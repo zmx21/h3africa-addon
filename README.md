@@ -2,7 +2,7 @@
 https://www.biorxiv.org/content/10.1101/2021.02.03.429542v1
 
 ## Data  
-#### Add-on SNPs for the H3Africa Array based on the TB-DAR cohort: [369154_H3A.AddOn_08_05_2020.score.csv](./data/369154_H3A.AddOn_08_05_2020.score.csv)
+#### Add-on SNPs for the H3Africa Array based on the TB-DAR cohort: [369154_H3A.AddOn_08_05_2020.score.csv](./results/369154_H3A.AddOn_08_05_2020.score.csv)
 #### Prioritized Gene Regions: [Prioritized_regions.csv](./data/Prioritized_regions.csv)
 
 ## Code
@@ -16,7 +16,7 @@ https://www.biorxiv.org/content/10.1101/2021.02.03.429542v1
 ### 2. Imputation and Add-on Tag Selection 
 #### A Snakemake file has been created to run both Imputation, Add-on Tag Selection, and Evaluation of Imputation Results: [Snakefile](./workflow/Snakefile)
   - Input files and settings should be specified in the config file: [config.yaml](./config/config.yaml)
-  - Snakemake should be run for Setting 1 first, then Setting 2. 
+  - Snakemake should be run for Setting 1 first, then Setting 2. The working directory should be [workflow](./workflow). 
   - All outputs will be stored in the [results](./results) directory. 
 
 ### 3. Figures
