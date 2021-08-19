@@ -1,0 +1,13 @@
+#!/bin/bash
+target_dir=$1
+prefix="ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/ALL.chr" ;
+suffix=".phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz" ;
+
+for chr in {1..22}; do
+    wget -P $target_dir "${prefix}""${chr}""${suffix}".tbi
+    wget -P $target_dir "${prefix}""${chr}""${suffix}"
+done
+bcftools concat -a -O v --threads 5 $target_dir"ALL.chr"{1..22}$SUFFIX |\
+bcftools view --threads 5 -O z --max-alleles 2 --types "snps" > $target_dir"joined.1000genomes.vcf.gz"
+bcftools index --tbi --threads 5 $target_dir"joined.1000genomes.vcf.gz"
+plink --vcf $target_dir"joined.1000genomes.vcf.gz" --snps-only --biallelic-only --make-bed -out $target_dir"joined.1000genomes"

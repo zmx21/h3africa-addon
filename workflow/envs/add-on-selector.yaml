@@ -1,0 +1,9 @@
+channels:
+  - bioconda
+  - conda-forge
+  - r
+dependencies:
+  - bcftools
+  - plink2=2.0
+  - r-base=4.1
+  

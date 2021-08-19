@@ -1,0 +1,957 @@
+configfile: "../config/config.yaml"
+
+rule all:
+  input:
+      "../results/WGS_Addtl_Tags/Setting2/TB_gene_regions_Setting2_Tagger_baseline.rds"
+
+#Recode X chr file and split VCF into training and testing set
+rule split_training_testing:
+  input: 
+    phased_vcf=config["phased_vcf_path"] + "joined.hg19.nodup.nomismap.nomissing.chr{chr}.phased.vcf.gz",
+    training_samples=config["training_samples"],
+    testing_samples=config["testing_samples"]
+  output:
+    training_vcf="../results/training_vcfs/chr{chr}.phased.training.vcf.gz",
+    testing_vcf="../results/testing_vcfs/chr{chr}.phased.testing.vcf.gz"
+  threads:5
+  shell:
+    """
+      mkdir -p ../results/tmp
+      mkdir -p ../results/training_vcfs/
+      mkdir -p ../results/testing_vcfs/
+      
+      CHR={wildcards.chr}
+      INPUT_PATH={input.phased_vcf}
+      
+      #Recode file if chr X
+      echo $CHR
+      plink2 --vcf $INPUT_PATH --export vcf bgz --out ../results/tmp/chr$CHR.recode
+      bcftools index -t --threads {threads} ../results/tmp/chr$CHR.recode.vcf.gz
+        
+      INPUT_PATH=../results/tmp/chr$CHR.recode.vcf.gz
+      
+      #Split into training/testing set
+      bcftools view $INPUT_PATH \
+        -S {input.training_samples} --force-samples -O z \
+        -o {output.training_vcf}
+              
+      bcftools index -t --threads {threads} {output.training_vcf}
+        
+      bcftools view $INPUT_PATH \
+        -S {input.testing_samples} --force-samples -O z \
+        -o {output.testing_vcf}
+        
+      bcftools index -t --threads {threads} {output.testing_vcf}
+    """
+
+#Create reference panel based on training set
+rule create_ref_panel:
+  input: 
+    training_vcf="../results/training_vcfs/chr{chr}.phased.training.vcf.gz"
+  output:
+    m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz'
+  threads:4
+  params:
+    minimac3=config["minimac3_exec"]
+  shell:
+    """
+      #!/bin/bash
+      {params.minimac3} --cpus {threads} --refHap {input.training_vcf} \
+      --processReference --prefix $(echo {output.m3vcf} | sed "s/".m3vcf.gz"/""/")
+    """
+
+rule write_baseline_file_matrix:
+  input:
+    afgr_imputed_path="../data/AFGRTesting.vcfs/AFGR.imputed.nodup.vcf.gz",
+    wgs_path="../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz"
+  output:
+    wgs_out="../results/Imputation_Eval/wgs_mat.bmat",
+    afgr_out="../results/Imputation_Eval/afgr_mat.bmat"
+  threads:1
+  shell:
+    """
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.afgr_imputed_path} "afgr" "../results/Imputation_Eval/"
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.wgs_path} "wgs" "../results/Imputation_Eval/"
+    """
+
+if config["setting"] == 'baseline':
+
+  rule impute_baseline:
+    input:
+      m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz',
+      testing_vcf="../results/testing_vcfs/chr{chr}.phased.testing.vcf.gz"
+    output:
+      testing_h3a_vcf="../results/testing_vcfs/chr{chr}.phased.testing.h3a.vcf.gz",
+      imputed="../results/Baseline/WGS_Imputed/chr{chr}.dose.vcf.gz"
+    threads:4
+    params:
+      h3a_snps=config["h3a_snps"],
+      minimac3=config["minimac3_exec"],
+      minimac4=config["minimac4_exec"]
+
+    shell:
+      """
+        plink2 --vcf {input.testing_vcf} --extract bed1 {params.h3a_snps} \
+        --export vcf bgz --out $(echo {output.testing_h3a_vcf} | sed "s/".vcf.gz"/""/")
+      
+        bcftools index -t --threads {threads} {output.testing_h3a_vcf}
+        
+        if [ {wildcards.chr} == 'PAR' ]
+        then
+	        #Process X CHR Autosomal Region
+	        {params.minimac3} --refHaps {input.m3vcf}\
+		      --haps {output.testing_h3a_vcf} \
+		      --prefix  $(echo {output.imputed}| sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads} > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        else
+	        {params.minimac4} --refHaps {input.m3vcf}\
+		      --haps {output.testing_h3a_vcf} \
+		      --prefix $(echo {output.imputed} | sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads}  > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        fi
+      """
+  rule merge_imputation:
+    input:
+      imputed_vcf=expand("../results/Baseline/WGS_Imputed/chr{chr}.dose.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR']),
+      testing_vcf=expand("../results/testing_vcfs/chr{chr}.phased.testing.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR'])
+    output:
+      testing_info="../results/testing_vcfs/allchr.info",
+      testing_merged="../results/testing_vcfs/allchr.vcf.gz",
+      wgs_merged="../results/Baseline/WGS_Imputed/WGS.imputed.vcf.gz",
+      wgs_afgr_merged="../results/Baseline/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt"
+    params:
+      afgr_imputed_path="../data/AFGRTesting.vcfs/",
+      afgr_prefix='AFGR.imputed'
+    threads:5
+    shell:
+      """
+        OUT_DIR="../results/Baseline/WGS_Imputed/"
+        mkdir -p "../results/Baseline/WGS_Imputed/tmp/"
+        mkdir -p "../results/testing_vcfs/tmp/"
+        for file in {input.testing_vcf}
+        do
+          bcftools query -f '%CHROM %POS %ID %REF %ALT\n' $file >> {output.testing_info}
+        done
+        #Merge phased WGS data
+        bcftools concat ../results/testing_vcfs/chr{{1..22}}.phased.testing.vcf.gz -O z \
+        -o ../results/testing_vcfs/tmp/autosomes.phased.testing.vcf.gz
+        
+        bcftools query -l ../results/testing_vcfs/chrX.phased.testing.vcf.gz > ../results/testing_vcfs/chrX.samples
+        
+        bcftools view -S ../results/testing_vcfs/chrX.samples -O z \
+        -o ../results/testing_vcfs//tmp/autosomes.phased.consensus.testing.vcf.gz \
+        ../results/testing_vcfs/tmp/autosomes.phased.testing.vcf.gz
+        
+        bcftools view -S ../results/testing_vcfs/chrX.samples -O z \
+        -o ../results/testing_vcfs/tmp/chrPAR.phased.consensus.testing.vcf.gz \
+        ../results/testing_vcfs/chrPAR.phased.testing.vcf.gz
+        bcftools concat -O z -o {output.testing_merged}.tmp \
+        ../results/testing_vcfs/tmp/autosomes.phased.consensus.testing.vcf.gz \
+        ../results/testing_vcfs/{{'chrX.phased','/tmp/chrPAR.phased.consensus'}}.testing.vcf.gz
+        
+        bcftools sort -O z -o {output.testing_merged} {output.testing_merged}.tmp
+        bcftools index -t --threads {threads} {output.testing_merged}
+        
+        rm -r ../results/testing_vcfs/tmp/
+        rm ../results/testing_vcfs/chrX.samples
+        rm {output.testing_merged}.tmp
+                #Merge WGS Imputed
+        bcftools concat -O z -o $OUT_DIR"/tmp/autosomes.vcf.gz" $OUT_DIR"chr"{{1..22}}".dose.vcf.gz"
+        bcftools query -l $OUT_DIR"chrX.dose.vcf.gz" > $OUT_DIR"/tmp/chrX.samples.txt"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/autosomes.vcf.gz" 
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrX.consensus.vcf.gz" $OUT_DIR"chrX.dose.vcf.gz"
+                
+        bcftools view -h $OUT_DIR"chrPAR.dose.vcf.gz"> $OUT_DIR"/tmp/header"
+        sed -i '2 a ##FILTER=<ID=GENOTYPED,Description="Site was genotyped">' $OUT_DIR"/tmp/header"
+        bcftools reheader -h $OUT_DIR"/tmp/header" -o $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" $OUT_DIR"chrPAR.dose.vcf.gz"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrPAR.consensus.vcf.gz" $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" 
+        
+        bcftools concat -O z -o $OUT_DIR/tmp/"raw.vcf.gz" $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/chr"{{"X","PAR"}}".consensus.vcf.gz" 
+        bcftools sort -O z -o {output.wgs_merged} -T $OUT_DIR $OUT_DIR"/tmp/raw.vcf.gz"
+    
+        bcftools index -t --threads 5 {output.wgs_merged} 
+        bcftools query -f "%CHROM %POS %ID %REF %ALT\n" {output.wgs_merged} > {output.wgs_merged}.pos
+        rm -r $OUT_DIR'/tmp/'
+        Rscript ./scripts/Imputation/merge_imputation_results.R {params.afgr_imputed_path} {params.afgr_prefix} $OUT_DIR {output.testing_info} "../results/Baseline/WGS_AFGR_Imputed/" {threads}
+        
+      """
+      
+  rule write_wgs_baseline_file_matrix:
+    input:
+      wgs_imputed="../results/Baseline/WGS_Imputed/WGS.imputed.vcf.gz"
+    output:
+      wgs_out="../results/Imputation_Eval/wgs_imp_baseline_mat.bmat"
+    threads:1
+    shell:
+      """
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.wgs_imputed} "wgs_imp_baseline" "../results/Imputation_Eval/"
+      """
+      
+  rule evaluate_imputation:
+    input:
+      wgs_afgr_imp_path="../results/Baseline/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/Baseline/Tag_SNP_Selection/TB_gene_regions_baseline.rds"
+    threads:20
+    params:
+      setting='baseline',
+      out_dir="../results/Baseline/Tag_SNP_Selection/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+  
+  rule calc_r2_baseline:
+    input:
+      "../results/Imputation_Eval/afgr_mat.bmat",
+      "../results/Imputation_Eval/wgs_imp_baseline_mat.bmat",
+      "../results/Imputation_Eval/wgs_mat.bmat"
+    output:
+      "../results/Imputation_Eval/afgr_non_h3a_cor.rds",
+      "../results/Imputation_Eval/wgs_imp_non_h3a_cor.rds"
+    threads:1
+    shell:
+      """
+        Rscript ./scripts/Imputation/calc_r2.R "baseline" "WGS" &
+        Rscript ./scripts/Imputation/calc_r2.R "baseline" "AFGR" 
+      """
+
+elif config["setting"] == 'setting1':
+
+  rule select_tags:
+    input:
+      snps_in_gene_regions_parsed_path='../results/Baseline/Tag_SNP_Selection/TB_gene_regions_baseline.rds',
+      keep_samples_path='../data/WGS_Host_Data/testing_set/testing_split.txt',
+      existing_tags = '../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      lift_over_vcf = '../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz'
+    output:
+      "../results/WGS_Addtl_Tags/addlt.tags.setting1.rds"
+    params:
+      out_prefix = 'addlt.tags.setting1',
+      site_type = 'wgs',
+      phased_vcf = '../results/testing_vcfs/'
+    threads:40
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/Setting1.R {params.out_prefix} {params.site_type} {input.snps_in_gene_regions_parsed_path} {input.keep_samples_path} {input.existing_tags} {input.lift_over_vcf} {params.phased_vcf} {threads}
+      """
+      
+  rule impute_setting1:
+    input:
+      m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz',
+      testing_vcf="../results/WGS_Addtl_Tags/Setting1/chr{chr}.addlt.tags.setting1.random.testing.vcf.gz",
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      imputed="../results/WGS_Addtl_Tags/Setting1/WGS_Imputed/chr{chr}.dose.vcf.gz"
+    threads:4
+    params:
+      h3a_snps=config["h3a_snps"],
+      minimac3=config["minimac3_exec"],
+      minimac4=config["minimac4_exec"]
+    shell:
+      """
+        if [ {wildcards.chr} == 'PAR' ]
+        then
+	        #Process X CHR Autosomal Region
+	        {params.minimac3} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix  $(echo {output.imputed}| sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads} > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        else
+	        {params.minimac4} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix $(echo {output.imputed} | sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads}  > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        fi
+      """
+  
+  rule impute_setting1_random:
+    input:
+      m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz',
+      testing_vcf="../results/WGS_Addtl_Tags/Setting1Random/chr{chr}.addlt.tags.setting1.random.testing.vcf.gz",
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      imputed="../results/WGS_Addtl_Tags/Setting1Random/WGS_Imputed/chr{chr}.dose.vcf.gz"
+    threads:4
+    params:
+      h3a_snps=config["h3a_snps"],
+      minimac3=config["minimac3_exec"],
+      minimac4=config["minimac4_exec"]
+    shell:
+      """
+        if [ {wildcards.chr} == 'PAR' ]
+        then
+	        #Process X CHR Autosomal Region
+	        {params.minimac3} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix  $(echo {output.imputed}| sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads} > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        else
+	        {params.minimac4} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix $(echo {output.imputed} | sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads}  > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        fi
+      """
+      
+  rule merge_imputation_setting1:
+    input:
+      imputed_vcf=expand("../results/WGS_Addtl_Tags/Setting1/WGS_Imputed/chr{chr}.dose.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR']),
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      wgs_merged="../results/WGS_Addtl_Tags/Setting1/WGS_Imputed/WGS.imputed.vcf.gz",
+      wgs_afgr_merged="../results/WGS_Addtl_Tags/Setting1/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt"
+    params:
+      afgr_imputed_path="../results/WGS_Addtl_Tags/Setting1/AFGRSetting1.vcfs/",
+      afgr_prefix='AFGRSetting1'
+    threads:5
+    shell:
+      """
+        OUT_DIR="../results/WGS_Addtl_Tags/Setting1/WGS_Imputed/"
+        mkdir -p "../results/WGS_Addtl_Tags/Setting1/WGS_Imputed/tmp/"
+        mkdir -p "../results/testing_vcfs/tmp/"
+        #Merge WGS Imputed
+        bcftools concat -O z -o $OUT_DIR"/tmp/autosomes.vcf.gz" $OUT_DIR"chr"{{1..22}}".dose.vcf.gz"
+        bcftools query -l $OUT_DIR"chrX.dose.vcf.gz" > $OUT_DIR"/tmp/chrX.samples.txt"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/autosomes.vcf.gz" 
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrX.consensus.vcf.gz" $OUT_DIR"chrX.dose.vcf.gz"
+                
+        bcftools view -h $OUT_DIR"chrPAR.dose.vcf.gz"> $OUT_DIR"/tmp/header"
+        sed -i '2 a ##FILTER=<ID=GENOTYPED,Description="Site was genotyped">' $OUT_DIR"/tmp/header"
+        bcftools reheader -h $OUT_DIR"/tmp/header" -o $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" $OUT_DIR"chrPAR.dose.vcf.gz"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrPAR.consensus.vcf.gz" $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" 
+        
+        bcftools concat -O z -o $OUT_DIR/tmp/"raw.vcf.gz" $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/chr"{{"X","PAR"}}".consensus.vcf.gz" 
+        bcftools sort -O z -o {output.wgs_merged} -T $OUT_DIR $OUT_DIR"/tmp/raw.vcf.gz"
+    
+        bcftools index -t --threads 5 {output.wgs_merged} 
+        bcftools query -f "%CHROM %POS %ID %REF %ALT\n" {output.wgs_merged} > {output.wgs_merged}.pos
+        rm -r $OUT_DIR'/tmp/'
+        Rscript ./scripts/Imputation/merge_imputation_results.R {params.afgr_imputed_path} \
+        {params.afgr_prefix} $OUT_DIR {input.testing_info} "../results/Baseline/WGS_AFGR_Imputed/" {threads}
+      """
+      
+  rule merge_imputation_setting1_random:
+    input:
+      imputed_vcf=expand("../results/WGS_Addtl_Tags/Setting1Random/WGS_Imputed/chr{chr}.dose.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR']),
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      wgs_merged="../results/WGS_Addtl_Tags/Setting1Random/WGS_Imputed/WGS.imputed.vcf.gz",
+      wgs_afgr_merged="../results/WGS_Addtl_Tags/Setting1Random/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt"
+    params:
+      afgr_imputed_path="../results/WGS_Addtl_Tags/Setting1Random/AFGRSetting1Random.vcfs/",
+      afgr_prefix='AFGRSetting1Random'
+    threads:5
+    shell:
+      """
+        OUT_DIR="../results/WGS_Addtl_Tags/Setting1Random/WGS_Imputed/"
+        mkdir -p "../results/WGS_Addtl_Tags/Setting1Random/WGS_Imputed/tmp/"
+        mkdir -p "../results/testing_vcfs/tmp/"
+        #Merge WGS Imputed
+        bcftools concat -O z -o $OUT_DIR"/tmp/autosomes.vcf.gz" $OUT_DIR"chr"{{1..22}}".dose.vcf.gz"
+        bcftools query -l $OUT_DIR"chrX.dose.vcf.gz" > $OUT_DIR"/tmp/chrX.samples.txt"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/autosomes.vcf.gz" 
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrX.consensus.vcf.gz" $OUT_DIR"chrX.dose.vcf.gz"
+                
+        bcftools view -h $OUT_DIR"chrPAR.dose.vcf.gz"> $OUT_DIR"/tmp/header"
+        sed -i '2 a ##FILTER=<ID=GENOTYPED,Description="Site was genotyped">' $OUT_DIR"/tmp/header"
+        bcftools reheader -h $OUT_DIR"/tmp/header" -o $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" $OUT_DIR"chrPAR.dose.vcf.gz"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrPAR.consensus.vcf.gz" $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" 
+        
+        bcftools concat -O z -o $OUT_DIR/tmp/"raw.vcf.gz" $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/chr"{{"X","PAR"}}".consensus.vcf.gz" 
+        bcftools sort -O z -o {output.wgs_merged} -T $OUT_DIR $OUT_DIR"/tmp/raw.vcf.gz"
+    
+        bcftools index -t --threads 5 {output.wgs_merged} 
+        bcftools query -f "%CHROM %POS %ID %REF %ALT\n" {output.wgs_merged} > {output.wgs_merged}.pos
+        rm -r $OUT_DIR'/tmp/'
+        Rscript ./scripts/Imputation/merge_imputation_results.R {params.afgr_imputed_path} \
+        {params.afgr_prefix} $OUT_DIR {input.testing_info} "../results/WGS_Addtl_Tags/Setting1Random/WGS_AFGR_Imputed/" {threads}
+        
+      """
+  rule write_matrix_setting1:
+    input:
+      wgs_imputed="../results/WGS_Addtl_Tags/Setting1/WGS_Imputed/WGS.imputed.vcf.gz",
+      afgr_imputed='../results/WGS_Addtl_Tags/Setting1/AFGRSetting1.vcfs/AFGRSetting1.vcf.gz'
+    output:
+      wgs_out="../results/Imputation_Eval/wgs_imp_setting1_mat.bmat",
+      afgr_out="../results/Imputation_Eval/afgr_setting1_mat.bmat"
+    threads:1
+    shell:
+      """
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.wgs_imputed} "wgs_imp_setting1" "../results/Imputation_Eval/"
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.afgr_imputed} "afgr_setting1" "../results/Imputation_Eval/"
+      """
+
+  rule write_matrix_setting1_random:
+    input:
+      wgs_imputed="../results/WGS_Addtl_Tags/Setting1Random/WGS_Imputed/WGS.imputed.vcf.gz",
+      afgr_imputed='../results/WGS_Addtl_Tags/Setting1Random/AFGRSetting1Random.vcfs/AFGRSetting1Random.nodup.vcf.gz'
+    output:
+      wgs_out="../results/Imputation_Eval/wgs_imp_setting1_random_mat.bmat",
+      afgr_out="../results/Imputation_Eval/afgr_setting1_random_mat.bmat"
+    threads:1
+    shell:
+      """
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.wgs_imputed} "wgs_imp_setting1_random" "../results/Imputation_Eval/"
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.afgr_imputed} "afgr_setting1_random" "../results/Imputation_Eval/"
+      """
+
+  rule evaluate_imputation_setting1:
+    input:
+      wgs_afgr_imp_path="../results/WGS_Addtl_Tags/Setting1/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/WGS_Addtl_Tags/addlt.tags.setting1.testing.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/WGS_Addtl_Tags/Setting1/TB_gene_regions_Setting1.rds"
+    threads:20
+    params:
+      setting='Setting1',
+      out_dir="../results/WGS_Addtl_Tags/Setting1/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+    
+
+  rule evaluate_imputation_setting1_random:
+    input:
+      wgs_afgr_imp_path="../results/WGS_Addtl_Tags/Setting1Random/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/WGS_Addtl_Tags/addlt.tags.setting1.random.testing.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/WGS_Addtl_Tags/Setting1Random/TB_gene_regions_Setting1Random.rds"
+    threads:20
+    params:
+      setting='Setting1Random',
+      out_dir="../results/WGS_Addtl_Tags/Setting1Random/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+  rule calc_r2_setting1:
+    input:
+      "../results/Imputation_Eval/wgs_imp_setting1_mat.bmat",
+      "../results/Imputation_Eval/afgr_mat.bmat",
+      "../results/Imputation_Eval/wgs_mat.bmat"
+
+    output:
+      "../results/Imputation_Eval/afgr_setting1_non_h3a_cor.rds",
+      "../results/Imputation_Eval/wgs_imp_setting1_non_h3a_cor.rds"
+    threads:4
+    shell:
+      """
+        Rscript ./scripts/Imputation/calc_r2.R "setting1" "AFGR" "F" &
+        Rscript ./scripts/Imputation/calc_r2.R "setting1" "WGS" "F" 
+      """
+  rule calc_r2_setting1_random:
+    input:
+      "../results/Imputation_Eval/wgs_imp_setting1_random_mat.bmat",
+      "../results/Imputation_Eval/afgr_mat.bmat",
+      "../results/Imputation_Eval/wgs_mat.bmat"
+
+    output:
+      "../results/Imputation_Eval/afgr_setting1_random_non_h3a_cor.rds",
+      "../results/Imputation_Eval/wgs_imp_setting1_random_non_h3a_cor.rds"
+    threads:4
+    shell:
+      """
+        Rscript ./scripts/Imputation/calc_r2.R "setting1" "AFGR" "T" &
+        Rscript ./scripts/Imputation/calc_r2.R "setting1" "WGS" "T" 
+      """
+
+elif config["setting"] == 'setting2':
+  rule select_tags_setting2:
+    input:
+        setting2_merged='../results/WGS_Addtl_Tags/Setting2/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt'
+    output:
+      '../results/WGS_Addtl_Tags/addlt.tags.setting2.rds',
+      '../results/WGS_Addtl_Tags/h3a.with.addlt.tags.setting2.txt',
+      '../results/WGS_Addtl_Tags/h3a.with.addlt.tags.setting2.random.txt'
+    shell:
+      """
+          Rscript ./scripts/Add_On_Selection/Setting2.R
+      """
+      
+  rule impute_setting2:
+    input:
+      m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz',
+      testing_vcf="../results/WGS_Addtl_Tags/Setting2/chr{chr}.addlt.tags.setting2.random.testing.vcf.gz",
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      imputed="../results/WGS_Addtl_Tags/Setting2/WGS_Imputed/chr{chr}.dose.vcf.gz"
+    threads:4
+    params:
+      h3a_snps=config["h3a_snps"],
+      minimac3=config["minimac3_exec"],
+      minimac4=config["minimac4_exec"]
+    shell:
+      """
+        if [ {wildcards.chr} == 'PAR' ]
+        then
+	        #Process X CHR Autosomal Region
+	        {params.minimac3} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix  $(echo {output.imputed}| sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads} > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        else
+	        {params.minimac4} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix $(echo {output.imputed} | sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads}  > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        fi
+      """
+  
+  rule impute_setting2_random:
+    input:
+      m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz',
+      testing_vcf="../results/WGS_Addtl_Tags/Setting2Random/chr{chr}.addlt.tags.setting2.random.testing.vcf.gz",
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      imputed="../results/WGS_Addtl_Tags/Setting2Random/WGS_Imputed/chr{chr}.dose.vcf.gz"
+    threads:4
+    params:
+      h3a_snps=config["h3a_snps"],
+      minimac3=config["minimac3_exec"],
+      minimac4=config["minimac4_exec"]
+    shell:
+      """
+        if [ {wildcards.chr} == 'PAR' ]
+        then
+	        #Process X CHR Autosomal Region
+	        {params.minimac3} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix  $(echo {output.imputed}| sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads} > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        else
+	        {params.minimac4} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix $(echo {output.imputed} | sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads}  > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        fi
+      """
+  rule merge_imputation_setting2:
+    input:
+      imputed_vcf=expand("../results/WGS_Addtl_Tags/Setting2/WGS_Imputed/chr{chr}.dose.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR']),
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      wgs_merged="../results/WGS_Addtl_Tags/Setting2/WGS_Imputed/WGS.imputed.vcf.gz",
+      wgs_afgr_merged="../results/WGS_Addtl_Tags/Setting2/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt"
+    params:
+      afgr_imputed_path="../results/WGS_Addtl_Tags/Setting2/AFGRSetting2.vcfs/",
+      afgr_prefix='AFGRSetting2'
+    threads:5
+    shell:
+      """
+        OUT_DIR="../results/WGS_Addtl_Tags/Setting2/WGS_Imputed/"
+        mkdir -p "../results/WGS_Addtl_Tags/Setting2/WGS_Imputed/tmp/"
+        mkdir -p "../results/testing_vcfs/tmp/"
+        #Merge WGS Imputed
+        bcftools concat -O z -o $OUT_DIR"/tmp/autosomes.vcf.gz" $OUT_DIR"chr"{{1..22}}".dose.vcf.gz"
+        bcftools query -l $OUT_DIR"chrX.dose.vcf.gz" > $OUT_DIR"/tmp/chrX.samples.txt"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/autosomes.vcf.gz" 
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrX.consensus.vcf.gz" $OUT_DIR"chrX.dose.vcf.gz"
+                
+        bcftools view -h $OUT_DIR"chrPAR.dose.vcf.gz"> $OUT_DIR"/tmp/header"
+        sed -i '2 a ##FILTER=<ID=GENOTYPED,Description="Site was genotyped">' $OUT_DIR"/tmp/header"
+        bcftools reheader -h $OUT_DIR"/tmp/header" -o $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" $OUT_DIR"chrPAR.dose.vcf.gz"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrPAR.consensus.vcf.gz" $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" 
+        
+        bcftools concat -O z -o $OUT_DIR/tmp/"raw.vcf.gz" $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/chr"{{"X","PAR"}}".consensus.vcf.gz" 
+        bcftools sort -O z -o {output.wgs_merged} -T $OUT_DIR $OUT_DIR"/tmp/raw.vcf.gz"
+    
+        bcftools index -t --threads 5 {output.wgs_merged} 
+        bcftools query -f "%CHROM %POS %ID %REF %ALT\n" {output.wgs_merged} > {output.wgs_merged}.pos
+        rm -r $OUT_DIR'/tmp/'
+        Rscript ./scripts/Imputation/merge_imputation_results.R {params.afgr_imputed_path} \
+        {params.afgr_prefix} $OUT_DIR {input.testing_info} "../results/Baseline/WGS_AFGR_Imputed/" {threads}
+      """
+      
+  rule merge_imputation_setting2_random:
+    input:
+      imputed_vcf=expand("../results/WGS_Addtl_Tags/Setting2Random/WGS_Imputed/chr{chr}.dose.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR']),
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      wgs_merged="../results/WGS_Addtl_Tags/Setting2Random/WGS_Imputed/WGS.imputed.vcf.gz",
+      wgs_afgr_merged="../results/WGS_Addtl_Tags/Setting2Random/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt"
+    params:
+      afgr_imputed_path="../results/WGS_Addtl_Tags/Setting2Random/AFGRSetting2Random.vcfs/",
+      afgr_prefix='AFGRSetting2Random'
+    threads:5
+    shell:
+      """
+        OUT_DIR="../results/WGS_Addtl_Tags/Setting2Random/WGS_Imputed/"
+        mkdir -p "../results/WGS_Addtl_Tags/Setting2Random/WGS_Imputed/tmp/"
+        mkdir -p "../results/testing_vcfs/tmp/"
+        #Merge WGS Imputed
+        bcftools concat -O z -o $OUT_DIR"/tmp/autosomes.vcf.gz" $OUT_DIR"chr"{{1..22}}".dose.vcf.gz"
+        bcftools query -l $OUT_DIR"chrX.dose.vcf.gz" > $OUT_DIR"/tmp/chrX.samples.txt"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/autosomes.vcf.gz" 
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrX.consensus.vcf.gz" $OUT_DIR"chrX.dose.vcf.gz"
+                
+        bcftools view -h $OUT_DIR"chrPAR.dose.vcf.gz"> $OUT_DIR"/tmp/header"
+        sed -i '2 a ##FILTER=<ID=GENOTYPED,Description="Site was genotyped">' $OUT_DIR"/tmp/header"
+        bcftools reheader -h $OUT_DIR"/tmp/header" -o $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" $OUT_DIR"chrPAR.dose.vcf.gz"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrPAR.consensus.vcf.gz" $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" 
+        
+        bcftools concat -O z -o $OUT_DIR/tmp/"raw.vcf.gz" $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/chr"{{"X","PAR"}}".consensus.vcf.gz" 
+        bcftools sort -O z -o {output.wgs_merged} -T $OUT_DIR $OUT_DIR"/tmp/raw.vcf.gz"
+    
+        bcftools index -t --threads 5 {output.wgs_merged} 
+        bcftools query -f "%CHROM %POS %ID %REF %ALT\n" {output.wgs_merged} > {output.wgs_merged}.pos
+        rm -r $OUT_DIR'/tmp/'
+        Rscript ./scripts/Imputation/merge_imputation_results.R {params.afgr_imputed_path} \
+        {params.afgr_prefix} $OUT_DIR {input.testing_info} "../results/WGS_Addtl_Tags/Setting2Random/WGS_AFGR_Imputed/" {threads}
+        
+      """
+
+  rule write_matrix_Setting2:
+    input:
+      wgs_imputed="../results/WGS_Addtl_Tags/Setting2/WGS_Imputed/WGS.imputed.vcf.gz",
+      afgr_imputed='../results/WGS_Addtl_Tags/Setting2/AFGRSetting2.vcfs/AFGRSetting2.vcf.gz'
+    output:
+      wgs_out="../results/Imputation_Eval/wgs_imp_setting2_mat.bmat",
+      afgr_out="../results/Imputation_Eval/afgr_setting2_mat.bmat"
+    threads:1
+    shell:
+      """
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.wgs_imputed} "wgs_imp_setting2" "../results/Imputation_Eval/"
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.afgr_imputed} "afgr_setting2" "../results/Imputation_Eval/"
+      """
+
+  rule write_matrix_setting2_random:
+    input:
+      wgs_imputed="../results/WGS_Addtl_Tags/Setting2Random/WGS_Imputed/WGS.imputed.vcf.gz",
+      afgr_imputed='../results/WGS_Addtl_Tags/Setting2Random/AFGRSetting2Random.vcfs/AFGRSetting2Random.nodup.vcf.gz'
+    output:
+      wgs_out="../results/Imputation_Eval/wgs_imp_setting2_random_mat.bmat",
+      afgr_out="../results/Imputation_Eval/afgr_setting2_random_mat.bmat"
+    threads:1
+    shell:
+      """
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.wgs_imputed} "wgs_imp_setting2_random" "../results/Imputation_Eval/"
+        Rscript ./scripts/Imputation/write_file_matrix.R {input.afgr_imputed} "afgr_setting2_random" "../results/Imputation_Eval/"
+      """
+
+  rule evaluate_imputation_setting2_baseline:
+    input:
+      wgs_afgr_imp_path="../results/WGS_Addtl_Tags/Setting1/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/WGS_Addtl_Tags/addlt.tags.setting2.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/WGS_Addtl_Tags/Setting2/TB_gene_regions_Setting2_baseline.rds"
+    threads:20
+    params:
+      setting='Setting2Baseline',
+      out_dir="../results/WGS_Addtl_Tags/Setting2/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+
+  rule evaluate_imputation_setting2:
+    input:
+      wgs_afgr_imp_path="../results/WGS_Addtl_Tags/Setting2/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/WGS_Addtl_Tags/addlt.tags.setting2.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/WGS_Addtl_Tags/Setting2/TB_gene_regions_Setting2.rds"
+    threads:20
+    params:
+      setting='Setting2',
+      out_dir="../results/WGS_Addtl_Tags/Setting2/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+    
+
+  rule evaluate_imputation_setting2_random:
+    input:
+      wgs_afgr_imp_path="../results/WGS_Addtl_Tags/Setting2Random/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/WGS_Addtl_Tags/addlt.tags.setting2.random.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/WGS_Addtl_Tags/Setting2Random/TB_gene_regions_Setting2Random.rds"
+    threads:20
+    params:
+      setting='Setting2Random',
+      out_dir="../results/WGS_Addtl_Tags/Setting2Random/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+
+  rule calc_r2_setting2:
+    input:
+      "../results/Imputation_Eval/wgs_imp_setting2_mat.bmat",
+      "../results/Imputation_Eval/afgr_mat.bmat",
+      "../results/Imputation_Eval/wgs_mat.bmat"
+    output:
+      "../results/Imputation_Eval/afgr_setting2_non_h3a_cor.rds",
+      "../results/Imputation_Eval/wgs_imp_setting2_non_h3a_cor.rds"
+    threads:4
+    shell:
+      """
+        Rscript ./scripts/Imputation/calc_r2.R "setting2" "AFGR" "F" &
+        Rscript ./scripts/Imputation/calc_r2.R "setting2" "WGS" "F" 
+      """    
+      
+  rule calc_r2_setting2_random:
+    input:
+      "../results/Imputation_Eval/wgs_imp_setting2_random_mat.bmat",
+      "../results/Imputation_Eval/afgr_mat.bmat",
+      "../results/Imputation_Eval/wgs_mat.bmat"
+    output:
+      "../results/Imputation_Eval/afgr_setting2_random_non_h3a_cor.rds",
+      "../results/Imputation_Eval/wgs_imp_setting2_random_non_h3a_cor.rds"
+    threads:4
+    shell:
+      """
+        Rscript ./scripts/Imputation/calc_r2.R "setting2" "AFGR" "T" &
+        Rscript ./scripts/Imputation/calc_r2.R "setting2" "WGS" "T" 
+      """    
+
+elif config["setting"] == 'tagger_setting1':
+  rule impute_tagger_setting1:
+    input:
+      m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz',
+      testing_vcf="../results/Tagger/Addtl_Tags/Setting1/chr{chr}.addlt.tags.setting1.tagger.testing.vcf.gz",
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      imputed="../results/Tagger/Addtl_Tags/Setting1/WGS_Imputed/chr{chr}.dose.vcf.gz"
+    threads:4
+    params:
+      h3a_snps=config["h3a_snps"],
+      minimac3=config["minimac3_exec"],
+      minimac4=config["minimac4_exec"]
+    shell:
+      """
+        if [ {wildcards.chr} == 'PAR' ]
+        then
+	        #Process X CHR Autosomal Region
+	        {params.minimac3} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix  $(echo {output.imputed}| sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads} > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        else
+	        {params.minimac4} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix $(echo {output.imputed} | sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads}  > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        fi
+      """
+  rule merge_imputation_tagger_setting1:
+    input:
+      imputed_vcf=expand("../results/Tagger/Addtl_Tags/Setting1/WGS_Imputed/chr{chr}.dose.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR']),
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      wgs_merged="../results/Tagger/Addtl_Tags/Setting1/WGS_Imputed/WGS.imputed.vcf.gz",
+      wgs_afgr_merged="../results/Tagger/Addtl_Tags/Setting1/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt"
+    params:
+      afgr_imputed_path="../results/Tagger/Addtl_Tags/Setting1/AFGRSetting1Tagger.vcfs/",
+      afgr_prefix='AFGRSetting1Tagger'
+    threads:5
+    shell:
+      """
+        OUT_DIR="../results/Tagger/Addtl_Tags/Setting1/WGS_Imputed/"
+        mkdir -p "../results/Tagger/Addtl_Tags/Setting1/WGS_Imputed/tmp/"
+        mkdir -p "../results/testing_vcfs/tmp/"
+        #Merge WGS Imputed
+        bcftools concat -O z -o $OUT_DIR"/tmp/autosomes.vcf.gz" $OUT_DIR"chr"{{1..22}}".dose.vcf.gz"
+        bcftools query -l $OUT_DIR"chrX.dose.vcf.gz" > $OUT_DIR"/tmp/chrX.samples.txt"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/autosomes.vcf.gz" 
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrX.consensus.vcf.gz" $OUT_DIR"chrX.dose.vcf.gz"
+                
+        bcftools view -h $OUT_DIR"chrPAR.dose.vcf.gz"> $OUT_DIR"/tmp/header"
+        sed -i '2 a ##FILTER=<ID=GENOTYPED,Description="Site was genotyped">' $OUT_DIR"/tmp/header"
+        bcftools reheader -h $OUT_DIR"/tmp/header" -o $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" $OUT_DIR"chrPAR.dose.vcf.gz"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrPAR.consensus.vcf.gz" $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" 
+        
+        bcftools concat -O z -o $OUT_DIR/tmp/"raw.vcf.gz" $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/chr"{{"X","PAR"}}".consensus.vcf.gz" 
+        bcftools sort -O z -o {output.wgs_merged} -T $OUT_DIR $OUT_DIR"/tmp/raw.vcf.gz"
+    
+        bcftools index -t --threads 5 {output.wgs_merged} 
+        bcftools query -f "%CHROM %POS %ID %REF %ALT\n" {output.wgs_merged} > {output.wgs_merged}.pos
+        rm -r $OUT_DIR'/tmp/'
+        Rscript ./scripts/Imputation/merge_imputation_results.R {params.afgr_imputed_path} \
+        {params.afgr_prefix} $OUT_DIR {input.testing_info} "../results/Tagger/Addtl_Tags/Setting1/WGS_AFGR_Imputed/" {threads}
+        
+      """
+  rule evaluate_imputation_setting1_tagger:
+    input:
+      wgs_afgr_imp_path="../results/Tagger/Addtl_Tags/Setting1/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/Tagger/Addtl_Tags/addlt.tags.setting1.tagger.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/Tagger/Addtl_Tags/Setting1/TB_gene_regions_Setting1_Tagger.rds"
+    threads:20
+    params:
+      setting='Setting1Tagger',
+      out_dir="../results/Tagger/Addtl_Tags/Setting1/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+      
+
+elif config["setting"] == 'tagger_setting2':
+  rule impute_tagger_setting2:
+    input:
+      m3vcf='../results/Ref_Panel/Tanz_Minimac3/m3vcfs/chr{chr}.m3vcf.gz',
+      testing_vcf="../results/Tagger/Addtl_Tags/Setting2/chr{chr}.addlt.tags.setting2.tagger.testing.vcf.gz",
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      imputed="../results/Tagger/Addtl_Tags/Setting2/WGS_Imputed/chr{chr}.dose.vcf.gz"
+    threads:4
+    params:
+      h3a_snps=config["h3a_snps"],
+      minimac3=config["minimac3_exec"],
+      minimac4=config["minimac4_exec"]
+    shell:
+      """
+        if [ {wildcards.chr} == 'PAR' ]
+        then
+	        #Process X CHR Autosomal Region
+	        {params.minimac3} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix  $(echo {output.imputed}| sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads} > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        else
+	        {params.minimac4} --refHaps {input.m3vcf}\
+		      --haps {input.testing_vcf} \
+		      --prefix $(echo {output.imputed} | sed "s/".dose.vcf.gz"/""/") \
+		      --cpus {threads}  > $(echo {output.imputed}| sed "s/".dose.vcf.gz"/".log"/")
+	        bcftools index -t --threads {threads} {output.imputed}
+        fi
+      """
+  rule merge_imputation_tagger_setting2:
+    input:
+      imputed_vcf=expand("../results/Tagger/Addtl_Tags/Setting2/WGS_Imputed/chr{chr}.dose.vcf.gz",chr=list(range(1,23)) + ['X', 'PAR']),
+      testing_info="../results/testing_vcfs/allchr.info"
+    output:
+      wgs_merged="../results/Tagger/Addtl_Tags/Setting2/WGS_Imputed/WGS.imputed.vcf.gz",
+      wgs_afgr_merged="../results/Tagger/Addtl_Tags/Setting2/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt"
+    params:
+      afgr_imputed_path="../results/Tagger/Addtl_Tags/Setting2/AFGRSetting2Tagger.vcfs/",
+      afgr_prefix='AFGRSetting2Tagger'
+    threads:5
+    shell:
+      """
+        OUT_DIR="../results/Tagger/Addtl_Tags/Setting2/WGS_Imputed/"
+        mkdir -p "../results/Tagger/Addtl_Tags/Setting2/WGS_Imputed/tmp/"
+        mkdir -p "../results/testing_vcfs/tmp/"
+        #Merge WGS Imputed
+        bcftools concat -O z -o $OUT_DIR"/tmp/autosomes.vcf.gz" $OUT_DIR"chr"{{1..22}}".dose.vcf.gz"
+        bcftools query -l $OUT_DIR"chrX.dose.vcf.gz" > $OUT_DIR"/tmp/chrX.samples.txt"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/autosomes.vcf.gz" 
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrX.consensus.vcf.gz" $OUT_DIR"chrX.dose.vcf.gz"
+                
+        bcftools view -h $OUT_DIR"chrPAR.dose.vcf.gz"> $OUT_DIR"/tmp/header"
+        sed -i '2 a ##FILTER=<ID=GENOTYPED,Description="Site was genotyped">' $OUT_DIR"/tmp/header"
+        bcftools reheader -h $OUT_DIR"/tmp/header" -o $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" $OUT_DIR"chrPAR.dose.vcf.gz"
+        bcftools view -S $OUT_DIR"/tmp/chrX.samples.txt" -O z -o $OUT_DIR"/tmp/chrPAR.consensus.vcf.gz" $OUT_DIR"/tmp/chrPAR.dose.rehead.vcf.gz" 
+        
+        bcftools concat -O z -o $OUT_DIR/tmp/"raw.vcf.gz" $OUT_DIR"/tmp/autosomes.consensus.vcf.gz" $OUT_DIR"/tmp/chr"{{"X","PAR"}}".consensus.vcf.gz" 
+        bcftools sort -O z -o {output.wgs_merged} -T $OUT_DIR $OUT_DIR"/tmp/raw.vcf.gz"
+    
+        bcftools index -t --threads 5 {output.wgs_merged} 
+        bcftools query -f "%CHROM %POS %ID %REF %ALT\n" {output.wgs_merged} > {output.wgs_merged}.pos
+        rm -r $OUT_DIR'/tmp/'
+        Rscript ./scripts/Imputation/merge_imputation_results.R {params.afgr_imputed_path} \
+        {params.afgr_prefix} $OUT_DIR {input.testing_info} "../results/Tagger/Addtl_Tags/Setting2/WGS_AFGR_Imputed/" {threads}
+        
+      """
+  rule evaluate_imputation_setting2_tagger_baseline:
+    input:
+      wgs_afgr_imp_path="../results/Tagger/Addtl_Tags/Setting1/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/Tagger/Addtl_Tags/addlt.tags.setting2.tagger.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/Tagger/Addtl_Tags/Setting2/TB_gene_regions_Setting2_Tagger_baseline.rds"
+    threads:20
+    params:
+      setting='Setting2TaggerBaseline',
+      out_dir="../results/Tagger/Addtl_Tags/Setting2/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+
+  rule evaluate_imputation_setting2_tagger:
+    input:
+      wgs_afgr_imp_path="../results/Tagger/Addtl_Tags/Setting2/WGS_AFGR_Imputed/WGS_AFGR_Merged_Info.txt",
+      addtl_tags="../results/Tagger/Addtl_Tags/addlt.tags.setting2.tagger.vcf.gz",
+      raw_vcf="../data/WGS_Host_Data/WGS_Fellay.hg38.joint.118h-1947437863.genotyped.renamed.consensus.filt.vcf.gz",
+      h3a_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.bypos.h3achip.vcf.gz',
+      wgs_path='../data/WGS_Host_Data/joined.hg19.nodup.nomismap.vcf.gz',
+      wgs_excl='../data/WGS_Host_Data/mismapped_snps.txt',
+      wgs_dup='../data/WGS_Host_Data/joined.hg19.dupvars.txt'
+    output:
+      "../results/Tagger/Addtl_Tags/Setting2/TB_gene_regions_Setting2_Tagger.rds"
+    threads:20
+    params:
+      setting='Setting2Tagger',
+      out_dir="../results/Tagger/Addtl_Tags/Setting2/"
+    shell:
+      """
+        Rscript ./scripts/Add_On_Selection/check_imp_coverage.R {params.setting} {input.wgs_afgr_imp_path} {input.addtl_tags} {params.out_dir} \
+        {input.raw_vcf} {input.h3a_path} {input.wgs_path} {input.wgs_excl} {input.wgs_dup} {threads}
+      """
+      
+else:
+  print('Invalid Argument: setting. Please specify setting (baseline, setting1, or setting2)')
+  sys.exit()

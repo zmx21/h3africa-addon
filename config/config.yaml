@@ -1,0 +1,13 @@
+#Settings
+setting: 'setting2' #baseline,setting1,setting2,tagger_setting1,tagger_setting2
+
+#Input Paths
+phased_vcf_path: '../data/phased_vcfs/'
+training_samples: '../data/WGS_Host_Data/training_set/training_split.txt'
+testing_samples: '../data/WGS_Host_Data/testing_set/testing_split.txt'
+h3a_snps: '../data/WGS_Host_Data/h3a_pos.txt'
+
+
+#Minimac3
+minimac3_exec: '../software/Minimac3Executable/bin/Minimac3-omp'
+minimac4_exec: '../software/Minimac4/release-build/minimac4'

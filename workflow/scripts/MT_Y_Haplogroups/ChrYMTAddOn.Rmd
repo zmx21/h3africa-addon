@@ -1,0 +1,239 @@
+---
+title: "ChrY_ChrMT_Addon"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## ChrY 
+### Overlap Between Proposed Add-on and H3A Array (V2)
+We check for how many of the phylogenetic informative SNPs are already included on the H3A-array (V2).
+```{r Y_overlap,warning=F,message=F,echo=F}
+library(pbmcapply)
+library(dplyr)
+library(biomaRt)
+h3a_v2_path <- '../../../data/H3Africa/v2/H3Africa_2019_20037295_A1.csv'
+h3a_v2 <- data.table::fread(h3a_v2_path,skip=5) %>% 
+  dplyr::select(CHR = Chr,POS = MapInfo,SNP,IlmnID,Name,IlmnStrand,RefStrand)
+
+h3a_v1 <- data.table::fread('../../../data/Chip_Data/h3achip_dbsnp150.tsv')
+h3a_v1$CHR <- unlist(pbmclapply(h3a_v1$NUID,function(x)
+  strsplit(x=x,split = ':')[[1]][1],mc.cores = 20))
+h3a_v1$POS <- as.numeric(unlist(pbmclapply(h3a_v1$NUID,function(x) 
+  strsplit(x=x,split = ':')[[1]][2],mc.cores = 20)))
+
+h3a_V2_Y <- dplyr::filter(h3a_v2,CHR == 'Y')
+h3a_V1_Y <- dplyr::filter(h3a_v1,CHR == 'Y')
+
+h3a_V2_Unknown <- dplyr::filter(h3a_v2,CHR == 0)
+
+h3a_V2_Unknown_rs_1 <- dplyr::filter(h3a_V2_Unknown,grepl("h3a-req-rs",Name))
+h3a_V2_Unknown_rs_1$Name <- sapply(h3a_V2_Unknown_rs_1$Name,function(x) strsplit(x=strsplit(x=x,split = 'h3a-req-')[[1]][2],split = '_ver')[[1]][1])
+
+h3a_V2_Unknown_rs_2 <- dplyr::filter(h3a_V2_Unknown,grepl("seq-rs",Name))
+h3a_V2_Unknown_rs_2$Name <- sapply(h3a_V2_Unknown_rs_2$Name,function(x) strsplit(x=x,split = 'seq-')[[1]][2])
+h3a_V2_Unknown_rs_3 <- dplyr::filter(h3a_V2_Unknown,grepl("rs",Name) & !grepl("seq-rs",Name) & !grepl("h3a",Name))
+
+library(stringr)
+GRCh38_dbsnp_Y <- data.table::fread(
+  '../../../data/genome_builds/human_9606_b151_GRCh38p7/chrY.GRCh38.dbsnp151')
+colnames(GRCh38_dbsnp_Y) <- c('CHR','ID','POS','REF','ALT','RV')
+
+GRCh37_dbsnp_Y <- data.table::fread(
+  '../../../data/genome_builds/human_9606_b151_GRCh37p13/chrY.GRCh37.dbsnp151')
+colnames(GRCh37_dbsnp_Y) <- c('CHR','ID','POS','REF','ALT','RV')
+
+h3a_V2_Y_GRCh37 <- dplyr::left_join(h3a_V2_Y,GRCh37_dbsnp_Y,by=c('POS'='POS')) %>%
+  dplyr::filter(!(is.na(ID) & str_count(Name, "rs")!=1))
+h3a_V2_Unknown_merged_Y <- rbind(rbind(h3a_V2_Unknown_rs_1,h3a_V2_Unknown_rs_2),h3a_V2_Unknown_rs_3) %>% dplyr::inner_join(GRCh37_dbsnp_Y,by=c('Name'='ID'))
+
+h3a_V2_Y_GRCh38 <- dplyr::left_join(h3a_V2_Y_GRCh37,GRCh38_dbsnp_Y %>% 
+                                      dplyr::select(ID,POS.38=POS),by=c('ID'='ID'))
+```
+```{r major_haplo_Y,warning=F,message=F,echo=F}
+ChrY_proposed_addon <- data.table::fread('../../../data/Y/chrY_markers_hg38_MZ.csv')
+#Some rows have multple position associated (need to expand out)
+multi_pos <- which(sapply(ChrY_proposed_addon$Position_hg38,function(x) grepl(x=x,pattern = ';')))
+multi_pos_df <- ChrY_proposed_addon[0,]
+for(i in 1:nrow(ChrY_proposed_addon[multi_pos,])){
+  cur_row <- ChrY_proposed_addon[multi_pos,][i,]
+  cur_pos <- unlist(strsplit(x=cur_row$Position_hg38,split = ';'))
+  cur_row_rep <- cur_row[rep(1,length(cur_pos)),]
+  cur_row_rep$Position_hg38 <- cur_pos
+  multi_pos_df <- rbind(multi_pos_df,cur_row_rep)
+}
+#Merge back multi pos rows
+ChrY_proposed_addon <- rbind(ChrY_proposed_addon[-multi_pos,],multi_pos_df)
+ChrY_proposed_addon$Position_hg38_numeric <- as.numeric(ChrY_proposed_addon$Position_hg38)
+addOnPos <- ChrY_proposed_addon$Position_hg38
+
+#Treat SNPs first, bind to dbSNP for rsid 
+Y_Haplo_snps <- ChrY_proposed_addon %>% dplyr::filter(!is.na(Position_hg38_numeric))
+Y_Haplo_snps <- dplyr::left_join(Y_Haplo_snps,GRCh38_dbsnp_Y,c('Position_hg38_numeric' = 'POS'))
+#Filter out snps which are not in dbsnp (can't find a probe for it anyways)
+Y_Haplo_snps <- dplyr::filter(Y_Haplo_snps,!is.na(ID))
+
+#Treat indels
+Y_Haplo_indel <- ChrY_proposed_addon %>% dplyr::filter(is.na(Position_hg38_numeric))
+Y_Haplo_indel_with_rs <- dplyr::filter(Y_Haplo_indel,rs_ID != '-') %>% 
+  dplyr::left_join(GRCh38_dbsnp_Y,c('Position_hg38_numeric' = 'POS'))
+Y_Haplo_indel_with_rs$ID <- Y_Haplo_indel_with_rs$rs_ID
+
+#We take care of indels without rsid already labelled. 
+#some hacking: Be careful to check results if one wants to re-use the code!
+Y_Haplo_indel_no_rs <- dplyr::filter(Y_Haplo_indel,rs_ID == '-')
+indel_no_rs_start_pos <- as.numeric(sapply(Y_Haplo_indel_no_rs$Position_hg38,
+                                           function(x) strsplit(x=x,split = '\\..')[[1]][1]))
+indel_no_rs_end_pos <- as.numeric(sapply(Y_Haplo_indel_no_rs$Position_hg38,
+                                         function(x) strsplit(x=x,split = '\\..')[[1]][2]))
+
+indel_rsids <- rep(NA,nrow(Y_Haplo_indel_no_rs))
+for(i in 1:nrow(Y_Haplo_indel_no_rs)){
+  cur_probable_indel <- dplyr::filter(GRCh38_dbsnp_Y,POS >= indel_no_rs_start_pos[i]-10 & 
+                                        POS <= indel_no_rs_end_pos[i]+10)
+  cur_probable_indel <- dplyr::filter(cur_probable_indel,nchar(REF) > 1 | nchar(ALT) > 1)
+  if(nrow(cur_probable_indel) == 0){
+    next
+  }
+  indel_rsids[i] <- cur_probable_indel$ID
+}
+Y_Haplo_indel_no_rs <- Y_Haplo_indel_no_rs[!is.na(indel_rsids),] 
+Y_Haplo_indel_no_rs <- Y_Haplo_indel_no_rs %>% 
+  dplyr::left_join(GRCh38_dbsnp_Y,c('Position_hg38_numeric' = 'POS'))
+Y_Haplo_indel_no_rs$ID <- indel_rsids[!is.na(indel_rsids)]
+
+#Final parsed candidate Y_Haplo 
+parsed_Y_Haplo <- rbind(rbind(Y_Haplo_snps,Y_Haplo_indel_no_rs),Y_Haplo_indel_with_rs)
+```
+In total, the H3A-array contains `r nrow(h3a_V2_Y_GRCh37)+nrow(h3a_V2_Unknown_merged_Y)` SNPs within the Y-Chromosome. `r nrow(parsed_Y_Haplo)` has been proposed for the add on. We find that `r length(intersect(parsed_Y_Haplo$ID,c(h3a_V2_Y_GRCh37$ID,h3a_V2_Unknown_merged_Y$Name)))` are already included on the array.
+
+We next check how many of the major Haplogroup markers are already included. 
+
+## Chr Y Major Haplogroups
+We take all major haplogroups. For B and E haplogroups, we take 2 levels down. 
+```{r haplo_major}
+is_major_haplo <- ((str_count(parsed_Y_Haplo$Subgroup, "[0-9]") <= 1) & (str_count(parsed_Y_Haplo$Subgroup, "[a-z]") == 0)) |
+  (str_count(parsed_Y_Haplo$Subgroup, "[ABER]") > 0 & str_count(parsed_Y_Haplo$Subgroup, "[a-z]") <= 2) | 
+  (str_count(parsed_Y_Haplo$Subgroup, "[\\(]") == 1) |
+  (str_count(parsed_Y_Haplo$Subgroup, "or") == 1) & (parsed_Y_Haplo$Subgroup != "P1~ or K2b2a~")
+print(sort(unique(parsed_Y_Haplo$Subgroup[is_major_haplo])))
+n_snps_major_haplo <- sum(is_major_haplo)
+major_haplo_n_snps_existing <- length(intersect(parsed_Y_Haplo$ID[is_major_haplo],h3a_V2_Y_GRCh38$ID))
+print(paste0('Major Haplogroup SNPs Proposed:',n_snps_major_haplo))
+print(paste0('Major Haplogroup SNPs Existing:',major_haplo_n_snps_existing))
+
+h3a_V2_Y_GRCh38 <- dplyr::filter(h3a_V2_Y_GRCh38,!is.na(POS.38))
+write(setdiff(parsed_Y_Haplo$ID[is_major_haplo],h3a_V2_Y_GRCh38$ID),file = '~/G2G_TB/MT_Y_Haplogroups/Add_On_Y_Major_rsid.txt')
+add_on_pos <- dplyr::filter(parsed_Y_Haplo,ID %in% setdiff(parsed_Y_Haplo$ID[is_major_haplo],h3a_V2_Y_GRCh38$ID))$Position_hg38
+is_indel <- sapply(add_on_pos,function(x) grepl(pattern = '\\.\\.',x=x))
+pos_df <- rbind(data.frame(Chr = 'Y',V1=as.numeric(add_on_pos[!is_indel]),V2=as.numeric(add_on_pos[!is_indel])),
+                data.frame(Chr = 'Y',V1=as.numeric(sapply(add_on_pos[is_indel],function(x) strsplit(x=x,split = '\\.\\.')[[1]][1])),V2=as.numeric(sapply(add_on_pos[is_indel],function(x) strsplit(x=x,split = '\\.\\.')[[1]][2]))))
+pos_GRCh37 <- dplyr::left_join(data.frame(Chr = 'Y',ID=setdiff(parsed_Y_Haplo$ID[is_major_haplo],h3a_V2_Y_GRCh38$ID)),GRCh37_dbsnp_Y,by=c('ID'='ID')) %>% dplyr::filter(!is.na(POS))
+pos_df_GRCh37 <- rbind(data.frame(Chr = 'Y',V1=pos_GRCh37$POS,V2=pos_GRCh37$POS))
+
+
+h3a_add_on_Y <- rbind(pos_df,data.frame(Chr = 'Y',V1=h3a_V2_Y_GRCh38$POS.38,V2 = h3a_V2_Y_GRCh38$POS.38) %>% dplyr::distinct(V1,V2,.keep_all=T))
+h3a_add_on_Y_GRCh37 <- rbind(pos_df_GRCh37,data.frame(Chr = 'Y',V1=h3a_V2_Y_GRCh38$POS,V2 = h3a_V2_Y_GRCh38$POS) %>% dplyr::distinct(V1,V2,.keep_all=T))
+
+h3a_Y <- data.frame(Chr = 'Y',V1=h3a_V2_Y_GRCh38$POS.38,V2 = h3a_V2_Y_GRCh38$POS.38) %>% dplyr::distinct(V1,V2,.keep_all=T)
+h3a_Y_GRCh37 <- data.frame(Chr = 'Y',V1=h3a_V2_Y_GRCh38$POS,V2 = h3a_V2_Y_GRCh38$POS) %>% dplyr::distinct(V1,V2,.keep_all=T)
+
+data.table::fwrite(h3a_add_on_Y,file = '../../../results/MT_Y_Haplogroups/H3A_Add_On_Y_Major_pos.txt',col.names = F,row.names = F,quote = F,sep = ' ')
+data.table::fwrite(h3a_Y,file = '../../../results/MT_Y_Haplogroups/H3A_Y_Major_pos.txt',col.names = F,row.names = F,quote = F,sep = ' ')
+
+data.table::fwrite(h3a_add_on_Y_GRCh37,file = '../../../results/MT_Y_Haplogroups/H3A_Add_On_Y_Major_pos_GRCh37.txt',col.names = F,row.names = F,quote = F,sep = ' ')
+data.table::fwrite(h3a_Y_GRCh37,file = '../../../results/MT_Y_Haplogroups/H3A_Y_Major_pos_GRCh37.txt',col.names = F,row.names = F,quote = F,sep = ' ')
+
+add_on_Y <- dplyr::anti_join(h3a_add_on_Y,h3a_Y)
+colnames(add_on_Y) <- c('Chromosome','Start_Coordinate','End_Coordinate')
+data.table::fwrite(add_on_Y,file = '../../../results/MT_Y_Haplogroups/Add_On_Y_Major_pos.csv',col.names = T,row.names = F,quote = F,sep = ',')
+
+add_on_Y_illumina <- data.table::fread('../../../results/Tag_SNP_Selection/WGS.Y.Illumina.Scores.csv') %>% dplyr::left_join(GRCh37_dbsnp_Y,by=c('Locus_Name'='ID'))
+data.table::fwrite( rbind(data.frame(Chr='Y',V1=add_on_Y_illumina$Coordinate,V2 = add_on_Y_illumina$Coordinate),data.frame(Chr = 'Y',V1=h3a_V2_Y_GRCh38$POS.38,V2 = h3a_V2_Y_GRCh38$POS.38) %>% dplyr::distinct(V1,V2,.keep_all=T)),file = '../../../results/MT_Y_Haplogroups/Illumina_H3A_Add_On_Y_Major_pos.txt',col.names = F,row.names = F,quote = F,sep = ' ')
+
+data.table::fwrite( rbind(data.frame(Chr='Y',V1=add_on_Y_illumina$POS,V2 = add_on_Y_illumina$POS),data.frame(Chr = 'Y',V1=h3a_V2_Y_GRCh38$POS,V2 = h3a_V2_Y_GRCh38$POS) %>% dplyr::distinct(V1,V2,.keep_all=T)),file = '../../../results/MT_Y_Haplogroups/Illumina_H3A_Add_On_Y_Major_pos_GRCh37.txt',col.names = F,row.names = F,quote = F,sep = ' ')
+
+```
+## ChrMT 
+### Overlap Between Proposed Add-on and H3A Array (V2)
+We check for how many of the phylogenetic informative SNPs are already included on the H3A-array (V2).
+```{r MT_overlap,warning=F,message=F,echo=F}
+library(pbmcapply)
+library(dplyr)
+library(biomaRt)
+
+h3a_V2_MT <- dplyr::filter(h3a_v2,CHR == 'MT')
+h3a_V2_Unknown_mito <- dplyr::filter(h3a_V2_Unknown,grepl("Mito",Name))
+h3a_V2_Unknown_mito$POS <- as.numeric(sapply(h3a_V2_Unknown_mito$Name,function(x) gsub(pattern = '[A-Za-z]',replacement = '',x=x)))
+h3a_V2_Unknown_mito$CHR <- 'MT' 
+
+library(stringr)
+GRCh38_dbsnp_MT <- data.table::fread(
+  '../../../data/genome_builds/human_9606_b151_GRCh38p7/chrMT.GRCh38.dbsnp151')
+colnames(GRCh38_dbsnp_MT) <- c('CHR','ID','POS','REF','ALT','RV')
+
+GRCh37_dbsnp_MT <- data.table::fread(
+  '../../../data/genome_builds/human_9606_b151_GRCh37p13/chrMT.GRCh37.dbsnp151')
+colnames(GRCh37_dbsnp_MT) <- c('CHR','ID','POS','REF','ALT','RV')
+
+h3a_V2_MT_GRCh38 <- dplyr::left_join(h3a_V2_MT,GRCh38_dbsnp_MT,by=c('POS'='POS')) %>%
+  dplyr::filter(!(is.na(ID) & str_count(Name, "rs")!=1))
+
+h3a_V2_Unknown_merged_MT <- rbind(rbind(h3a_V2_Unknown_rs_1,h3a_V2_Unknown_rs_2),h3a_V2_Unknown_rs_3) %>% dplyr::inner_join(GRCh37_dbsnp_MT,by=c('Name'='ID'))
+h3a_V2_Unknown_mito <- h3a_V2_Unknown_mito %>% dplyr::left_join(GRCh37_dbsnp_MT,by=c('POS'='POS'))
+```
+```{r MT_Proposed,warning=F,message=F}
+source('ParseMTTree.R')
+proposed_snps_MT_distinct <- dplyr::distinct(haplogroup_snp_df_mapped_snps,POS,.keep_all=T)
+```
+In total, the H3A-array contains `r nrow(h3a_V2_MT)+nrow(h3a_V2_Unknown_merged_MT)+nrow(h3a_V2_Unknown_mito)` SNPs within the MT-Chromosome. `r nrow(proposed_snps_MT_distinct)` has been proposed for the add on. We find that `r length(intersect(proposed_snps_MT_distinct$POS,c(h3a_V2_MT_GRCh38$POS,h3a_V2_Unknown_merged_MT$POS.y,h3a_V2_Unknown_mito$h3a_V2_Unknown_mito$POS)))` are already included on the array.
+We next check how many of the major Haplogroup markers are already included. 
+
+### Chr MT Major Haplogroups
+
+We take all major haplogroups and in addition, 2 levels down from L haplogroups. (eg. L0a) and 1 level down for the M haplogroup. 
+```{r major_haplo_MT,warning=F,message=F}
+#Check for Haplogroup A-G
+M_haplo_incl <- c("M","M1'20'51",'M1',"N","N1'5","N1","R","R0","U")
+
+L_Haplo <- str_count(haplogroup_snp_df_mapped_snps$Haplogroup, "[L]") == 1
+le_single_lower <- str_count(haplogroup_snp_df_mapped_snps$Haplogroup, "[a-z]") <= 1
+no_lower <- str_count(haplogroup_snp_df_mapped_snps$Haplogroup, "[a-z]") == 0
+le_single_numeric <- str_count(haplogroup_snp_df_mapped_snps$Haplogroup, "[0-9]") <= 1
+divider <- str_count(haplogroup_snp_df_mapped_snps$Haplogroup, "\\'") >= 1
+
+is_MT_major_Haplo <- L_Haplo & ((le_single_lower & le_single_numeric) | (divider & no_lower) | (divider & le_single_numeric))
+is_MT_major_Haplo <- is_MT_major_Haplo | (haplogroup_snp_df_mapped_snps$Haplogroup %in% M_haplo_incl)
+print(unique(haplogroup_snp_df_mapped_snps[is_MT_major_Haplo,]$Haplogroup))
+
+MT_major_haplo_only <- haplogroup_snp_df_mapped_snps[is_MT_major_Haplo,] %>% 
+  dplyr::distinct(POS,ID,.keep_all=T)
+rs_to_excl <- c('rs193302991',"rs386828863","rs193302982","rs527236043",
+                "rs193302997","rs193302993","rs386828867","rs193302980",
+                "rs193302994","rs193302983","rs527236210")
+MT_major_haplo_only <- dplyr::filter(MT_major_haplo_only,!ID %in% rs_to_excl)
+n_snps_major_haplo_MT <- nrow(MT_major_haplo_only)
+major_haplo_n_snps_existing_MT <- length(intersect(MT_major_haplo_only$POS,c(h3a_V2_MT_GRCh38$POS,
+                                                                             h3a_V2_Unknown_merged_MT$POS.y,
+                                                                             h3a_V2_Unknown_mito$POS)))
+
+print(paste0('Major Haplogroup SNPs Proposed:',n_snps_major_haplo_MT))
+print(paste0('Major Haplogroup SNPs Existing:',major_haplo_n_snps_existing_MT))
+add_on_id <- dplyr::filter(MT_major_haplo_only,POS %in% setdiff(MT_major_haplo_only$POS,c(h3a_V2_MT_GRCh38$POS,
+                                                                             h3a_V2_Unknown_merged_MT$POS.y,
+                                                                             h3a_V2_Unknown_mito$POS)))$ID
+write(add_on_id,file = '../../../results/MT_Y_Haplogroups/Add_On_MT_Major_rsid.txt')
+data.table::fwrite(data.frame(Chr = 'MT',V1 = union(MT_major_haplo_only$POS,c(h3a_V2_MT_GRCh38$POS,h3a_V2_Unknown_merged_MT$POS.y,h3a_V2_Unknown_mito$POS)),
+                              V2 = union(MT_major_haplo_only$POS,c(h3a_V2_MT_GRCh38$POS,h3a_V2_Unknown_merged_MT$POS.y,h3a_V2_Unknown_mito$POS))),
+                   '../../../results/MT_Y_Haplogroups/H3A_Add_On_MT_Major_pos.txt',row.names = F,col.names = F,quote = F,sep = ' ')
+data.table::fwrite(data.frame(Chr = 'MT',V1 = c(h3a_V2_MT_GRCh38$POS,h3a_V2_Unknown_merged_MT$POS.y,h3a_V2_Unknown_mito$POS),
+                              V2 = c(h3a_V2_MT_GRCh38$POS,h3a_V2_Unknown_merged_MT$POS.y,h3a_V2_Unknown_mito$POS)),
+                   '../../../results/MT_Y_Haplogroups/H3A_MT_Major_pos.txt',row.names = F,col.names = F,quote = F,sep = ' ')
+
+
+add_on_MT_illumina <- data.table::fread('../../../results/Tag_SNP_Selection/WGS.MT.Illumina.Scores.csv')
+data.table::fwrite(data.frame(Chr = 'MT',V1 = union(add_on_MT_illumina$Coordinate,c(h3a_V2_MT_GRCh38$POS,h3a_V2_Unknown_merged_MT$POS.y,h3a_V2_Unknown_mito$POS)),
+                              V2 = union(add_on_MT_illumina$Coordinate,c(h3a_V2_MT_GRCh38$POS,h3a_V2_Unknown_merged_MT$POS.y,h3a_V2_Unknown_mito$POS))),file = '../../../results/MT_Y_Haplogroups/Illumina_H3A_Add_On_MT_Major_pos.txt',col.names = F,row.names = F,quote = F,sep = ' ')
+
+```
