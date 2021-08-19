@@ -14,7 +14,7 @@ https://www.biorxiv.org/content/10.1101/2021.02.03.429542v1
    - Split data into training and testing set.
 
 ### 2. Imputation and Add-on Tag Selection 
-#### A Snakemake file has been created to run both Imputation, Add-on Tag Selection, and Evaluation of Imputation Results: [Snakefile](./workflow/Snakefile)
+#### A Snakemake file has been created to run Imputation, Add-on Tag Selection, and Evaluation of Imputation Results: [Snakefile](./workflow/Snakefile)
   - Input files and settings should be specified in the config file: [config.yaml](./config/config.yaml)
   - Snakemake should be run for Setting 1 first, then Setting 2. The working directory should be [workflow](./workflow). 
   - All outputs will be stored in the [results](./results) directory. 
