@@ -4,7 +4,7 @@ library(pbmcapply)
 library(kableExtra)
 library(latex2exp)
 library(ggpubr)
-
+library(filematrix)
 load('../results/Tag_SNP_Selection/setting2.rda')
 remove(list = setdiff(ls(),'region_info'))
 
@@ -671,28 +671,99 @@ rownames(tbl1) <- c('Setting 1 - Proposed Approach','Setting 1 - Tagger','Settin
                              'Setting 2 - Proposed Approach','Setting 2 - Tagger','Setting 2 - Random')
 
 
-#### Fig S3
-# PlotInfoH3A <- function(info_rds){
-#   info_file <- readRDS(info_rds)
-#   info_file <- lapply(info_file,function(x) {x$MAF = pmin(x$AFGR_AF,1-x$AFGR_AF); return(x)})
-#   MAF_bins <- quantile(info_file$TBDAR$MAF,probs = c(seq(0,0.4,0.1),seq(0.51,1,0.07)))
-# 
-#   Binned_INFO <- lapply(info_file,function(df) pbmcmapply(function(x,y) {
-#     curBin <- dplyr::filter(df,MAF > x & MAF <= y)
-#     return(curBin$INFO)
-#   },MAF_bins[1:(length(MAF_bins) - 1)],MAF_bins[2:(length(MAF_bins))],SIMPLIFY = F,mc.cores = 5))
-# 
-#   Binned_INFO_df <- lapply(Binned_INFO,function(x) data.frame(MAF = (MAF_bins[1:(length(MAF_bins) - 1)] + MAF_bins[2:(length(MAF_bins))]) / 2,
-#                                                               INFO = sapply(x,function(y) sum(y > 0.8)/length(y))))
-#   Binned_INFO_df_bind <- dplyr::bind_rows(Binned_INFO_df,.id = "Population")
-#   Binned_INFO_df_bind$Population[Binned_INFO_df_bind$Population == 'TBDAR'] <- 'TB-DAR'
-#   Binned_INFO_df_bind$Population <- factor(Binned_INFO_df_bind$Population,levels = c('TB-DAR',setdiff(Binned_INFO_df_bind$Population,'TB-DAR')))
-#   cbp2 <- c("#000000", "#E69F00", "#56B4E9", "#009E73",
-#             "#0072B2", "#D55E00", "#CC79A7")
-# 
-#   return(ggplot(Binned_INFO_df_bind,aes(x=MAF,y=INFO,color = Population)) + geom_point() + geom_line() + xlab('Minor Allele Frequency (MAF)') + ylab('Fraction of Variant Sites Imputed\n (INFO > 0.8)') + scale_color_manual(values = cbp2))
-# 
-# }
-# autosomes_info <- PlotInfoH3A('../results/1000_Genomes/info_file.rds')
-# x_info <- PlotInfoH3A('../results/1000_Genomes/info_file_X.rds')
-# ggarrange(autosomes_info + ggtitle('Autosomes'),x_info + ggtitle('X Chromosome'),labels = c('A)','B)'))
+### Fig S3
+PlotInfoH3A <- function(info_rds){
+  info_file <- readRDS(info_rds)
+  info_file <- lapply(info_file,function(x) {x$MAF = pmin(x$AFGR_AF,1-x$AFGR_AF); return(x)})
+  MAF_bins <- quantile(info_file$TBDAR$MAF,probs = c(seq(0,0.4,0.1),seq(0.51,1,0.07)))
+
+  Binned_INFO <- lapply(info_file,function(df) pbmcmapply(function(x,y) {
+    curBin <- dplyr::filter(df,MAF > x & MAF <= y)
+    return(curBin$INFO)
+  },MAF_bins[1:(length(MAF_bins) - 1)],MAF_bins[2:(length(MAF_bins))],SIMPLIFY = F,mc.cores = 5))
+
+  Binned_INFO_df <- lapply(Binned_INFO,function(x) data.frame(MAF = (MAF_bins[1:(length(MAF_bins) - 1)] + MAF_bins[2:(length(MAF_bins))]) / 2,
+                                                              INFO = sapply(x,function(y) sum(y > 0.8)/length(y))))
+  Binned_INFO_df_bind <- dplyr::bind_rows(Binned_INFO_df,.id = "Population")
+  Binned_INFO_df_bind$Population[Binned_INFO_df_bind$Population == 'TBDAR'] <- 'TB-DAR'
+  Binned_INFO_df_bind$Population <- factor(Binned_INFO_df_bind$Population,levels = c('TB-DAR',setdiff(Binned_INFO_df_bind$Population,'TB-DAR')))
+  cbp2 <- c("#000000", "#E69F00", "#56B4E9", "#009E73",
+            "#0072B2", "#D55E00", "#CC79A7")
+
+  return(ggplot(Binned_INFO_df_bind,aes(x=MAF,y=INFO,color = Population)) + geom_point() + geom_line() + xlab('Minor Allele Frequency (MAF)') + ylab('Fraction of Variant Sites Imputed\n (INFO > 0.8)') + scale_color_manual(values = cbp2))
+
+}
+autosomes_info <- PlotInfoH3A('../results/1000_Genomes/info_file.rds')
+x_info <- PlotInfoH3A('../results/1000_Genomes/info_file_X.rds')
+ggarrange(autosomes_info + ggtitle('Autosomes'),x_info + ggtitle('X Chromosome'),labels = c('A)','B)'))
+
+### Fig S4
+snp_add_on <- data.table::fread('../data/369154_H3A.AddOn_08_05_2020.score.csv',skip = 15,header = T)
+chr_order <- c(paste0(seq(1,22)),'X','Y','MT')
+snp_add_on$Chromosome <- factor(x=snp_add_on$Chromosome,levels = chr_order)
+setting1_snps <- data.table::fread('../results/WGS_Addtl_Tags/h3a.with.addlt.tags.setting1.txt',header = F)
+setting2_snps <- data.table::fread('../results/WGS_Addtl_Tags/h3a.with.addlt.tags.setting2.txt',header = F)
+
+setting2_snps <- setdiff(setting2_snps$V1,setting1_snps$V1)
+
+setting2_snps_df <- dplyr::filter(snp_add_on,Locus_Name %in% setting2_snps)
+setting2_snps_df$Setting <- 'Setting 2'
+setting1_snps_df <- dplyr::filter(snp_add_on,Locus_Name %in% setting1_snps$V1)
+setting1_snps_df$Setting <- 'Setting 1'
+
+snp_add_on_df <- rbind(setting1_snps_df,setting2_snps_df)
+
+p1 = ggplot(snp_add_on_df, aes(x=Chromosome))+
+  geom_bar(stat="count", width=0.7) + facet_grid(~Setting,scales = 'free_x')
+
+h3a_v2_path <- '../data/H3Africa/v2/H3Africa_2019_20037295_A1.csv'
+h3a_v2 <- data.table::fread(h3a_v2_path,skip=5) %>% dplyr::select(CHR = Chr,POS = MapInfo,IlmnID,Name)
+
+chr_order <- c(paste0(seq(1,22)),'X','Y','XY','MT')
+h3a_v2$Chromosome <- factor(x=h3a_v2$CHR,levels = chr_order)
+
+p2 = ggplot(h3a_v2 %>% dplyr::filter(!is.na(Chromosome)), aes(x=Chromosome))+
+  geom_bar(stat="count", width=0.7) 
+
+ggpubr::ggarrange(p1 + theme(plot.margin = unit(c(1,1,1,1), "lines")),
+                  p2 + theme(plot.margin = unit(c(1,1,1,1), "lines")),nrow = 2,labels = c('A)','B)'))
+
+### Fig S5
+MT_Haplo <- data.table::fread('../results/MT_Y_Haplogroups/Comparisons_SNParrays_chrM_haplogrep.csv')
+MT_Haplo$Major_Haplogroup <- sapply(MT_Haplo$Haplogroup_H3Africa,function(x) paste0(strsplit(x=x,split = '')[[1]][1:2],collapse = ''))
+
+Y_Haplo <- data.table::fread('../results/MT_Y_Haplogroups/Comparisons_SNParrays_chrY_yhaplo.csv')
+Y_Haplo$Major_Haplogroup <- sapply(Y_Haplo$Haplogroup_H3A,function(x) paste0(strsplit(x=x,split = '')[[1]][1:2],collapse = ''))
+
+p1 = ggplot(MT_Haplo, aes(x=Major_Haplogroup))+
+  geom_bar(stat="count", width=0.7) 
+p2 = ggplot(Y_Haplo, aes(x=Major_Haplogroup))+
+  geom_bar(stat="count", width=0.7) 
+ggpubr::ggarrange(p1,p2,ncol = 2,labels = c('A)','B)'))
+
+## MI vs Cor 
+#### Cor vs MI ####
+source('../workflow/scripts/Add_On_Selection/Setting1.R')
+wgs_mat <- fm.open('../results/Imputation_Eval/wgs_mat')
+wgs_colnames <- data.table::fread('../results/Imputation_Eval/wgs_mat.nmscol.txt',header = F)$V1
+snps_in_gene_regions_parsed <- readRDS('../results/WGS_Addtl_Tags/Setting1/TB_gene_regions_Setting1.rds')
+rand_snps <- lapply(snps_in_gene_regions_parsed$snps_in_gene_regions_parsed,function(x) x$wgs_snps)
+rand_snps <- rand_snps[!sapply(rand_snps,function(x) all(is.na(x)))]
+rand_snps_df <- do.call(rbind,rand_snps)
+low_maf_snps <- rand_snps_df %>% dplyr::filter(MAF < 0.25 & MAF > 0.05)
+low_maf_snps <- low_maf_snps[sample(1:nrow(low_maf_snps),size = 500,replace = F),]
+high_maf_snps <- rand_snps_df %>% dplyr::filter(MAF > 0.25)
+high_maf_snps <- high_maf_snps[sample(1:nrow(high_maf_snps),size = 500,replace = F),]
+low_maf_geno <- wgs_mat[,match(low_maf_snps$ID,wgs_colnames)]
+high_maf_geno <- wgs_mat[,match(high_maf_snps$ID,wgs_colnames)]
+low_maf_MI <- MI_Calculation(low_maf_geno,low_maf_geno,low_maf_snps$ID,low_maf_snps$ID,method = 'MI')
+low_maf_cor <- MI_Calculation(low_maf_geno,low_maf_geno,low_maf_snps$ID,low_maf_snps$ID,method = 'cor')
+high_maf_MI <- MI_Calculation(high_maf_geno,high_maf_geno,high_maf_snps$ID,high_maf_snps$ID,method = 'MI')
+high_maf_cor <- MI_Calculation(high_maf_geno,high_maf_geno,high_maf_snps$ID,high_maf_snps$ID,method = 'cor')
+saveRDS(list(low_maf_MI=low_maf_MI,low_maf_cor=low_maf_cor,high_maf_MI=high_maf_MI,high_maf_cor=high_maf_cor),'../results/maf_cor_comparison.rds')
+maf_cor_comparison <- readRDS('../results/maf_cor_comparison.rds')
+low_MAF_plot <- ggplot(data = data.frame(MI=as.vector(maf_cor_comparison$low_maf_MI),r2=as.vector(maf_cor_comparison$low_maf_cor)^2)) + aes(x=MI,y=r2) +
+  geom_point() + xlim(0,1) + ylim(0,1)+ theme(plot.margin = unit(c(1,1,1,1), "lines"))+ ylab(TeX('$r^{2}$'))
+high_MAF_plot <- ggplot(data = data.frame(MI=as.vector(maf_cor_comparison$high_maf_MI),r2=as.vector(maf_cor_comparison$high_maf_cor)^2)) + aes(x=MI,y=r2) +
+  geom_point()+ xlim(0,1) + ylim(0,1) + theme(plot.margin = unit(c(1,1,1,1), "lines"))+ ylab(TeX('$r^{2}$'))
+ggpubr::ggarrange(low_MAF_plot,high_MAF_plot,ncol = 2,labels = c('A)','B)'))
