@@ -203,21 +203,41 @@ GetImputationDiff <- function(baseline_path,add_on_path,random_path,regions_impr
       snps_added_df_random <- dplyr::filter(snps_added_df_random,Source == 'AFGR')
     }
 
+    GetSE <- function(region_boundaries,snps_improved_df,is_0p8 = F){
+      if(is_0p8){
+        n_improved_eff_tags <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | (is.na(improv) & INFO.x > 0.8)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/nrow(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))
+        n_improved_eff_probes <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | (is.na(improv) & INFO.x > 0.8)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/sum(as.vector(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1]) %>% dplyr::select(N_Beads))))
+      }else{
+        n_improved_eff_tags <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | is.na(improv)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/nrow(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))
+        n_improved_eff_probes <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | is.na(improv)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/sum(as.vector(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1]) %>% dplyr::select(N_Beads))))
+      }
+      tags_se <- sd(unlist(n_improved_eff_tags)[unlist(n_improved_eff_tags) != Inf],na.rm = T) / sqrt(sum(!is.na(unlist(n_improved_eff_tags)[unlist(n_improved_eff_tags) != Inf])))
+      probes_se <- sd(unlist(n_improved_eff_probes)[unlist(n_improved_eff_probes) != Inf],na.rm = T) / sqrt(sum(!is.na(unlist(n_improved_eff_probes)[unlist(n_improved_eff_probes) != Inf])))
+      return(list(tags_se = tags_se,probes_se=probes_se))
+    }
+    
+    region_boundaries <- lapply(addon_tb_regions,function(x) list(CHROM = unique(x$wgs_snps$CHROM),POS = c(x$start_region,x$end_region)))
+    
     snps_improved_df <- dplyr::left_join(addon_tb_regions_imp_snps_non_h3a_filt,baseline_tb_regions_imp_snps_non_h3a,by=c('CHROM'='CHROM','POS'='POS','REF'='REF','ALT'='ALT')) %>% dplyr::mutate(improv = ifelse(INFO.x > INFO.y,T,F)) 
     n_improved <- length(which(is.na(snps_improved_df$improv) | snps_improved_df$improv == T))
+    n_improved_SE <- GetSE(region_boundaries,snps_improved_df,is_0p8 = F)
     
     snps_improved_0p8_df <- dplyr::left_join(addon_tb_regions_imp_snps_non_h3a_filt,baseline_tb_regions_imp_snps_non_h3a,by=c('CHROM'='CHROM','POS'='POS','REF'='REF','ALT'='ALT')) %>% dplyr::mutate(improv = ifelse(INFO.x > INFO.y & INFO.x > 0.8 & INFO.y < 0.8,T,F)) 
     n_improved_0p8 <- length(which((is.na(snps_improved_0p8_df$improv) & snps_improved_0p8_df$INFO.x > 0.8) | snps_improved_0p8_df$improv == T))
+    n_improved_0p8_SE <- GetSE(region_boundaries,snps_improved_0p8_df,is_0p8 = T)
     
     
     snps_improved_random_df <- dplyr::left_join(random_tb_regions_imp_snps_non_h3a_filt,baseline_tb_regions_imp_snps_non_h3a,by=c('CHROM'='CHROM','POS'='POS','REF'='REF','ALT'='ALT')) %>% dplyr::mutate(improv = ifelse(INFO.x > INFO.y,T,F)) 
     n_improved_random <- length(which(is.na(snps_improved_random_df$improv) | snps_improved_random_df$improv == T))
+    n_improved_random_SE <- GetSE(region_boundaries,snps_improved_random_df,is_0p8 = F)
     
     snps_improved_0p8_random_df <- dplyr::left_join(random_tb_regions_imp_snps_non_h3a_filt,baseline_tb_regions_imp_snps_non_h3a,by=c('CHROM'='CHROM','POS'='POS','REF'='REF','ALT'='ALT')) %>% dplyr::mutate(improv = ifelse(INFO.x > INFO.y & INFO.x > 0.8 & INFO.y < 0.8,T,F)) 
     n_improved_0p8_random <- length(which((is.na(snps_improved_0p8_random_df$improv) & snps_improved_0p8_random_df$INFO.x > 0.8) | snps_improved_0p8_random_df$improv == T))
+    n_improved_0p8_random_SE <- GetSE(region_boundaries,snps_improved_0p8_random_df,is_0p8 = T)
     
-    return(data.frame(n_snps_added=snps_added,n_improved=n_improved,n_improved_0p8 = n_improved_0p8,
-                      n_improved_random=n_improved_random,n_improved_0p8_random=n_improved_0p8_random,mean_design_score = mean(snps_added_df$Final_Score),n_beads_added = sum(snps_added_df$N_Beads)))
+    return(list(se = list(n_improved_SE=n_improved_SE,n_improved_0p8_SE=n_improved_0p8_SE,n_improved_random_SE=n_improved_random_SE,n_improved_0p8_random_SE=n_improved_0p8_random_SE),df = data.frame(n_snps_added=snps_added,n_improved=n_improved,n_improved_0p8 = n_improved_0p8,n_improved_0p8_SE=n_improved_0p8_SE,
+                      n_improved_random=n_improved_random,n_improved_0p8_random=n_improved_0p8_random,
+                      mean_design_score = mean(snps_added_df$Final_Score),design_score_SE = sd(snps_added_df$Final_Score)/sqrt(nrow(snps_added_df)),n_beads_added = sum(snps_added_df$N_Beads))))
   }
   
   all_snps_improv <- GetImprovInfo(baseline_tb_regions_imp_snps_raw,addon_tb_regions_imp_snps_raw,random_tb_regions_imp_snps_raw,addon_tb_regions,existing_tags,illumina_info,addtl_tags,addtl_tags_random,'ALL')
@@ -229,9 +249,11 @@ GetImputationDiff <- function(baseline_path,add_on_path,random_path,regions_impr
   #Info Score Plot
   INFO_df <- data.frame(MAF = c(mean_cut_off_points_baseline_info,mean_cut_off_points_addon_info,mean_cut_off_points_random_info),
                         INFO = c(sapply(baseline_bins_info$bins,mean),sapply(addon_bins_info$bins,mean),sapply(random_bins_info$bins,mean)),
+                        SE = c(sapply(baseline_bins_info$bins,function(x) sd(x) / sqrt(length(x))),sapply(addon_bins_info$bins,function(x) sd(x) / sqrt(length(x))),sapply(random_bins_info$bins,function(x) sd(x) / sqrt(length(x)))),
                         Chip = c(rep('H3Africa\n',length(baseline_bins_info$bins)),rep('H3Africa and \nAdd-On\n',length(addon_bins_info$bins)),rep('H3Africa and \nRandom\n',length(random_bins_info$bins))))
   INFO_plot <- ggplot(data = INFO_df) +
-    aes(x=MAF,y=INFO,color = Chip) + geom_line() + geom_point() + guides(color=guide_legend(title="Array Content")) + ylim(0,1)
+    aes(x=MAF,y=INFO,color = Chip) + geom_line() + geom_point() + geom_errorbar(aes(ymin=INFO-SE,ymax=INFO+SE),width = 0.005) + 
+    guides(color=guide_legend(title="Array Content")) + ylim(0,1)
   
   #R2 Plot
   baseline_cor_afgr <- readRDS('../results/Imputation_Eval/afgr_non_h3a_cor.rds') 
@@ -298,22 +320,28 @@ GetImputationDiff <- function(baseline_path,add_on_path,random_path,regions_impr
                       r2 = c(sapply(baseline_bins_cor$bins,function(x) mean(x,na.rm = T)),
                              sapply(addon_bins_cor$bins,function(x) mean(x,na.rm = T)),
                              sapply(random_bins_cor$bins,function(x) mean(x,na.rm = T))),
+                      SE = c(sapply(baseline_bins_cor$bins,function(x) sd(x,na.rm = T) / sqrt(sum(!is.na(x)))),
+                             sapply(addon_bins_cor$bins,function(x) sd(x,na.rm = T) / sqrt(sum(!is.na(x)))),
+                             sapply(random_bins_cor$bins,function(x) sd(x,na.rm = T) / sqrt(sum(!is.na(x))))),
                       Chip = c(rep('H3Africa\n',length(baseline_bins_cor$bins)),rep('H3Africa and\nAdd-On\n',length(addon_bins_cor$bins)),rep('H3Africa and\nRandom\n',length(random_bins_cor$bins))))
   R2_plot <- ggplot(data = R2_df) +
-    aes(x=MAF,y=r2,color = Chip) + geom_line() + geom_point() + guides(color=guide_legend(title="Array Content")) + ylim(0,1)
+    aes(x=MAF,y=r2,color = Chip) + geom_line() + geom_point() + guides(color=guide_legend(title="Array Content")) + ylim(0,1) + 
+    geom_errorbar(aes(ymin = r2-SE,ymax=r2+SE),width = 0.005)
   
 
   #Improvement Table
   type = c('All SNPs','WGS SNPs','AFGR SNPs')
-  df_tb <- rbind(all_snps_improv,wgs_snps_improv,afgr_snps_improv)
+  df_tb <- rbind(all_snps_improv$df,wgs_snps_improv$df,afgr_snps_improv$df)
   df_tb$type <- type
-  df_tb <- df_tb %>% dplyr::select(type,n_snps_added=n_snps_added,mean_design_score=mean_design_score,
+  df_tb <- df_tb %>% dplyr::select(type,n_snps_added=n_snps_added,mean_design_score=mean_design_score,design_score_SE=design_score_SE,
                                    n_beads_added=n_beads_added,n_improved=n_improved,n_improved_0p8 = n_improved_0p8,
-                                   n_improved_random=n_improved_random,n_improved_0p8_random=n_improved_0p8_random)
+                                   n_improved_random=n_improved_random,
+                                   n_improved_0p8_random=n_improved_0p8_random)
   tbl <- kable(df_tb, format = "latex", longtable = TRUE,booktabs = T,caption = "Tag SNPs added and Improvement Statistics.") %>%
     kable_styling(latex_options = "HOLD_position")
   
-  return(list(INFO_plot=INFO_plot,R2_plot=R2_plot,tbl=df_tb,R2_df=R2_df,INFO_df=INFO_df,
+  return(list(INFO_plot=INFO_plot,R2_plot=R2_plot,tbl=df_tb,se = all_snps_improv$se,
+              R2_df=R2_df,INFO_df=INFO_df,
               addon_tb_regions=addon_tb_regions,random_tb_regions=random_tb_regions))
   
 }
@@ -376,14 +404,33 @@ GetImputationDiffTagger <- function(baseline_path,tagger_path,regions_improved,i
       snps_added_df <- dplyr::filter(snps_added_df,Source == 'AFGR')
     }
     
+    GetSE <- function(region_boundaries,snps_improved_df,is_0p8 = F){
+      if(is_0p8){
+        n_improved_eff_tags <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | (is.na(improv) & INFO.x > 0.8)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/nrow(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))
+        n_improved_eff_probes <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | (is.na(improv) & INFO.x > 0.8)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/sum(as.vector(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1]) %>% dplyr::select(N_Beads))))
+      }else{
+        n_improved_eff_tags <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | is.na(improv)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/nrow(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))
+        n_improved_eff_probes <- lapply(region_boundaries,function(x) nrow(snps_improved_df %>% dplyr::filter((improv == T | is.na(improv)) & (CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1])))/sum(as.vector(snps_added_df %>% dplyr::filter(CHROM==x$CHROM & POS <= x$POS[2] & POS >= x$POS[1]) %>% dplyr::select(N_Beads))))
+      }
+      tags_se <- sd(unlist(n_improved_eff_tags)[unlist(n_improved_eff_tags) != Inf],na.rm = T) / sqrt(sum(!is.na(unlist(n_improved_eff_tags)[unlist(n_improved_eff_tags) != Inf])))
+      probes_se <- sd(unlist(n_improved_eff_probes)[unlist(n_improved_eff_probes) != Inf],na.rm = T) / sqrt(sum(!is.na(unlist(n_improved_eff_probes)[unlist(n_improved_eff_probes) != Inf])))
+      return(list(tags_se = tags_se,probes_se=probes_se))
+    }
+    
+    region_boundaries <- lapply(tagger_tb_regions,function(x) list(CHROM = unique(x$wgs_snps$CHROM),POS = c(x$start_region,x$end_region)))
+    
+    
     snps_improved_tagger_df <- dplyr::left_join(tagger_tb_regions_imp_snps_non_h3a_filt %>% dplyr::distinct(CHROM,POS,REF,ALT,.keep_all = T),baseline_tb_regions_imp_snps_non_h3a,by=c('CHROM'='CHROM','POS'='POS','REF'='REF','ALT'='ALT')) %>% dplyr::mutate(improv = ifelse(INFO.x > INFO.y,T,F)) 
     n_improved_tagger <- length(which(is.na(snps_improved_tagger_df$improv) | snps_improved_tagger_df$improv == T))
+    n_improved_tagger_SE <- GetSE(region_boundaries,snps_improved_tagger_df,is_0p8 = F)
     
     snps_improved_0p8_tagger_df <- dplyr::left_join(tagger_tb_regions_imp_snps_non_h3a_filt,baseline_tb_regions_imp_snps_non_h3a,by=c('CHROM'='CHROM','POS'='POS','REF'='REF','ALT'='ALT')) %>% dplyr::mutate(improv = ifelse(INFO.x > INFO.y & INFO.x > 0.8 & INFO.y < 0.8,T,F)) 
     n_improved_0p8_tagger <- length(which((is.na(snps_improved_0p8_tagger_df$improv) & snps_improved_0p8_tagger_df$INFO.x > 0.8) | snps_improved_0p8_tagger_df$improv == T))
+    n_improved_0p8_tagger_SE <- GetSE(region_boundaries,snps_improved_0p8_tagger_df,is_0p8 = T)
     
-    return(data.frame(n_snps_added=snps_added,
-                      n_improved_tagger,n_improved_0p8_tagger,mean_design_score = mean(snps_added_df$Final_Score),n_beads_added = sum(snps_added_df$N_Beads)))
+    return(list(se = list(n_improved_tagger_SE=n_improved_tagger_SE,n_improved_0p8_tagger_SE=n_improved_0p8_tagger_SE),df = data.frame(n_snps_added=snps_added,
+                      n_improved_tagger=n_improved_tagger,n_improved_0p8_tagger=n_improved_0p8_tagger,
+                      mean_design_score = mean(snps_added_df$Final_Score),design_score_SE = sd(snps_added_df$Final_Score)/sqrt(nrow(snps_added_df)),n_beads_added = sum(snps_added_df$N_Beads))))
   }
   
   all_snps_improv <- GetImprovInfo(baseline_tb_regions_imp_snps_raw,tagger_tb_regions_imp_snps_raw,existing_tags,illumina_info,tagger_tb_regions,addtl_tags,'ALL')
@@ -394,13 +441,13 @@ GetImputationDiffTagger <- function(baseline_path,tagger_path,regions_improved,i
   
   #Improvement Table
   type = c('All SNPs','WGS SNPs','AFGR SNPs')
-  df_tb <- rbind(all_snps_improv,wgs_snps_improv,afgr_snps_improv)
+  df_tb <- rbind(all_snps_improv$df,wgs_snps_improv$df,afgr_snps_improv$df)
   df_tb$type <- type
-  df_tb <- df_tb %>% dplyr::select(type,n_snps_added=n_snps_added,mean_design_score=mean_design_score,n_beads_added=n_beads_added,n_improved_tagger,n_improved_0p8_tagger)
+  df_tb <- df_tb %>% dplyr::select(type,n_snps_added,mean_design_score,design_score_SE,n_beads_added,n_improved_tagger,n_improved_0p8_tagger)
   tbl <- kable(df_tb, format = "latex", longtable = TRUE,booktabs = T,caption = "Tag SNPs added and Improvement Statistics.") %>%
     kable_styling(latex_options = "HOLD_position")
   
-  return(list(tbl=df_tb,tagger_tb_regions=tagger_tb_regions))
+  return(list(tbl=df_tb,tagger_tb_regions=tagger_tb_regions,se = all_snps_improv$se))
   
 }
 
@@ -595,9 +642,11 @@ R2_df <- rbind(Setting1_Plot$R2_df,Setting2_Plot$R2_df)
 
 r2 = TeX('Mean $r^{2}$')
 info_plot_maf <- ggplot(data = INFO_df) +
-  aes(x=MAF,y=INFO,color = Chip) + geom_line() + geom_point() + guides(color=guide_legend(title="Array Content")) + ylim(0,1) + xlab('Minor Allele Frequency (MAF)') + ylab('Mean INFO Score') + facet_grid(~Setting)
+  aes(x=MAF,y=INFO,color = Chip) + geom_line() + geom_point(size = 0.4) + guides(color=guide_legend(title="Array Content")) + ylim(0,1) + xlab('Minor Allele Frequency (MAF)') + ylab('Mean INFO Score') + facet_grid(~Setting)+ 
+  geom_errorbar(aes(ymin = INFO-SE,ymax=INFO+SE),width = 0.01)
 r2_plot_maf <- ggplot(data = R2_df) +
-  aes(x=MAF,y=r2,color = Chip) + geom_line() + geom_point() + guides(color=guide_legend(title="Array Content")) + ylim(0,1) + xlab('Minor Allele Frequency (MAF)') + ylab(r2) + facet_grid(~Setting)
+  aes(x=MAF,y=r2,color = Chip) + geom_line() + geom_point(size = 0.4) + guides(color=guide_legend(title="Array Content")) + ylim(0,1) + xlab('Minor Allele Frequency (MAF)') + ylab(r2) + facet_grid(~Setting)+ 
+  geom_errorbar(aes(ymin = r2-SE,ymax=r2+SE),width = 0.01)
 
 fig3 <- ggpubr::ggarrange(info_plot_maf,r2_plot_maf,
                          common.legend = T,nrow = 2)
@@ -648,22 +697,32 @@ setting2_tagger_WGS <- Setting2_Tagger_tbl$tbl[Setting2_Tagger_tbl$tbl$type == '
 
 tbl1 <- rbind(data.frame(n_beads_added = c(setting1_all_snps$n_beads_added,setting1_tagger_all_snps$n_beads_added,NA),
                             mean_design_score = c(setting1_all_snps$mean_design_score,setting1_tagger_all_snps$mean_design_score,NA),
+                            mean_design_score_SE = c(setting1_all_snps$design_score_SE,setting1_tagger_all_snps$design_score_SE,NA),
                             n_improved_per_bead = c(setting1_all_snps$n_improved / setting1_all_snps$n_beads_added,setting1_tagger_all_snps$n_improved_tagger/setting1_tagger_all_snps$n_beads_added,NA),
+                            n_improved_per_bead_SE =c(Setting1_Plot$se$n_improved_SE$probes_se,Setting1_Tagger_tbl$se$n_improved_tagger_SE$probes_se,NA),
                             n_improved_per_tag = c(setting1_all_snps$n_improved / setting1_all_snps$n_snps_added,setting1_tagger_all_snps$n_improved_tagger/setting1_tagger_all_snps$n_snps_added, setting1_all_snps$n_improved_random / setting1_all_snps$n_snps_added),
+                            n_improved_per_tag_SE =c(Setting1_Plot$se$n_improved_SE$tags_se,Setting1_Tagger_tbl$se$n_improved_tagger_SE$tags_se,Setting1_Plot$se$n_improved_random_SE$tags_se),
                             n_improved_AFGR = c(setting1_AFGR$n_improved / setting1_all_snps$n_improved,setting1_tagger_AFGR$n_improved_tagger/setting1_tagger_all_snps$n_improved_tagger, setting1_AFGR$n_improved_random / setting1_all_snps$n_improved_random),
                             n_improved_WGS = c(setting1_WGS$n_improved / setting1_all_snps$n_improved,setting1_tagger_WGS$n_improved_tagger/setting1_tagger_all_snps$n_improved_tagger, setting1_WGS$n_improved_random / setting1_all_snps$n_improved_random),
                             n_improved_0p8_per_bead =  c(setting1_all_snps$n_improved_0p8 / setting1_all_snps$n_beads_added,setting1_tagger_all_snps$n_improved_0p8_tagger/setting1_tagger_all_snps$n_beads_added,NA),
+                            n_improved_0p8_per_bead_SE =c(Setting1_Plot$se$n_improved_0p8_SE$probes_se,Setting1_Tagger_tbl$se$n_improved_0p8_tagger_SE$probes_se,NA),
                             n_improved_0p8_per_tag = c(setting1_all_snps$n_improved_0p8 / setting1_all_snps$n_snps_added,setting1_tagger_all_snps$n_improved_0p8_tagger/setting1_tagger_all_snps$n_snps_added, setting1_all_snps$n_improved_0p8_random / setting1_all_snps$n_snps_added),
+                            n_improved_0p8_per_tag_SE =c(Setting1_Plot$se$n_improved_0p8_SE$tags_se,Setting1_Tagger_tbl$se$n_improved_0p8_tagger_SE$tags_se,Setting1_Plot$se$n_improved_0p8_random_SE$tags_se),
                             n_improved_0p8_AFGR = c(setting1_AFGR$n_improved_0p8 / setting1_all_snps$n_improved_0p8,setting1_tagger_AFGR$n_improved_0p8_tagger/setting1_tagger_all_snps$n_improved_0p8_tagger, setting1_AFGR$n_improved_0p8_random / setting1_all_snps$n_improved_0p8_random),
                             n_improved_0p8_WGS = c(setting1_WGS$n_improved_0p8 / setting1_all_snps$n_improved_0p8,setting1_tagger_WGS$n_improved_0p8_tagger/setting1_tagger_all_snps$n_improved_0p8_tagger, setting1_WGS$n_improved_0p8_random / setting1_all_snps$n_improved_0p8_random)),
               data.frame(n_beads_added = c(setting2_all_snps$n_beads_added,setting2_tagger_all_snps$n_beads_added,NA),
                          mean_design_score = c(setting2_all_snps$mean_design_score,setting2_tagger_all_snps$mean_design_score,NA),
+                         mean_design_score_SE = c(setting2_all_snps$design_score_SE,setting2_tagger_all_snps$design_score_SE,NA),
                          n_improved_per_bead = c(setting2_all_snps$n_improved / setting2_all_snps$n_beads_added,setting2_tagger_all_snps$n_improved_tagger/setting2_tagger_all_snps$n_beads_added,NA),
+                         n_improved_per_bead_SE =c(Setting2_Plot$se$n_improved_SE$probes_se,Setting2_Tagger_tbl$se$n_improved_tagger_SE$probes_se,NA),
                          n_improved_per_tag = c(setting2_all_snps$n_improved / setting2_all_snps$n_snps_added,setting2_tagger_all_snps$n_improved_tagger/setting2_tagger_all_snps$n_snps_added, setting2_all_snps$n_improved_random / setting2_all_snps$n_snps_added),
+                         n_improved_per_tag_SE =c(Setting2_Plot$se$n_improved_SE$tags_se,Setting2_Tagger_tbl$se$n_improved_tagger_SE$tags_se,Setting2_Plot$se$n_improved_random_SE$tags_se),
                          n_improved_AFGR = c(setting2_AFGR$n_improved / setting2_all_snps$n_improved,setting2_tagger_AFGR$n_improved_tagger/setting2_tagger_all_snps$n_improved_tagger, setting2_AFGR$n_improved_random / setting2_all_snps$n_improved_random),
                          n_improved_WGS = c(setting2_WGS$n_improved / setting2_all_snps$n_improved,setting2_tagger_WGS$n_improved_tagger/setting2_tagger_all_snps$n_improved_tagger, setting2_WGS$n_improved_random / setting2_all_snps$n_improved_random),
                          n_improved_0p8_per_bead =  c(setting2_all_snps$n_improved_0p8 / setting2_all_snps$n_beads_added,setting2_tagger_all_snps$n_improved_0p8_tagger/setting2_tagger_all_snps$n_beads_added,NA),
+                         n_improved_0p8_per_bead_SE =c(Setting2_Plot$se$n_improved_0p8_SE$probes_se,Setting2_Tagger_tbl$se$n_improved_0p8_tagger_SE$probes_se,NA),
                          n_improved_0p8_per_tag = c(setting2_all_snps$n_improved_0p8 / setting2_all_snps$n_snps_added,setting2_tagger_all_snps$n_improved_0p8_tagger/setting2_tagger_all_snps$n_snps_added, setting2_all_snps$n_improved_0p8_random / setting2_all_snps$n_snps_added),
+                         n_improved_0p8_per_tag_SE =c(Setting2_Plot$se$n_improved_0p8_SE$tags_se,Setting2_Tagger_tbl$se$n_improved_0p8_tagger_SE$tags_se,Setting2_Plot$se$n_improved_0p8_random_SE$tags_se),
                          n_improved_0p8_AFGR = c(setting2_AFGR$n_improved_0p8 / setting2_all_snps$n_improved_0p8,setting2_tagger_AFGR$n_improved_0p8_tagger/setting2_tagger_all_snps$n_improved_0p8_tagger, setting2_AFGR$n_improved_0p8_random / setting2_all_snps$n_improved_0p8_random),
                          n_improved_0p8_WGS = c(setting2_WGS$n_improved_0p8 / setting2_all_snps$n_improved_0p8,setting2_tagger_WGS$n_improved_0p8_tagger/setting2_tagger_all_snps$n_improved_0p8_tagger, setting2_WGS$n_improved_0p8_random / setting2_all_snps$n_improved_0p8_random)
               ))
